@@ -12,6 +12,7 @@ import com.checkout.engine.entity.Product;
 import com.checkout.engine.entity.User;
 import com.checkout.engine.exception.DuplicateRequestException;
 import com.checkout.engine.exception.InvalidStateTransitionException;
+import com.checkout.engine.exception.LockAcquisitionException;
 import com.checkout.engine.exception.ResourceNotFoundException;
 import com.checkout.engine.repository.CartItemRepository;
 import com.checkout.engine.repository.CartRepository;
@@ -54,11 +55,42 @@ public class CheckoutService {
         }
         String normalizedIdempotencyKey = idempotencyKey.trim();
 
-        // Retry loop for optimistic lock conflicts, with a fresh transaction per attempt
+        // 1. Idempotency Check upfront (replays bypass cart lookup and locking)
+        var existingOrderOpt = orderRepository.findByIdempotencyKey(normalizedIdempotencyKey);
+        if (existingOrderOpt.isPresent()) {
+            Order existingOrder = existingOrderOpt.get();
+            if (!existingOrder.getUser().getId().equals(userId)) {
+                throw new DuplicateRequestException("Idempotency key already used by another user.");
+            }
+            log.info("Replaying existing order {} for idempotency key {}", existingOrder.getOrderNumber(), normalizedIdempotencyKey);
+            return mapToCheckoutResponse(existingOrder);
+        }
+
+        // 2. Fetch sorted productIds of user's active cart (read-only pre-lookup)
+        User user = userRepository.findById(userId)
+                .orElseThrow(() -> new ResourceNotFoundException("User", "id", userId));
+
+        Cart cart = cartRepository.findByUserIdAndStatus(userId, CartStatus.ACTIVE)
+                .orElseThrow(() -> new InvalidStateTransitionException("Cannot checkout: Active cart not found for user " + userId));
+
+        List<CartItem> cartItems = cartItemRepository.findByCartId(cart.getId());
+        if (cartItems.isEmpty()) {
+            throw new InvalidStateTransitionException("Cannot checkout: Active cart is empty");
+        }
+
+        List<Long> lockedProductIds = cartItems.stream()
+                .map(item -> item.getProduct().getId())
+                .distinct()
+                .sorted()
+                .toList();
+
+        // 3. Retry loop for optimistic lock conflicts, wrapping DB transaction inside distributed lock
         for (int attempt = 1; attempt <= MAX_CHECKOUT_ATTEMPTS; attempt++) {
             try {
-                return checkoutTransactionRunner.runInTransaction(() ->
-                        doCheckout(userId, normalizedIdempotencyKey)
+                return inventoryLockStrategy.executeWithDistributedLock(lockedProductIds, () ->
+                        checkoutTransactionRunner.runInTransaction(() ->
+                                doCheckout(userId, normalizedIdempotencyKey, lockedProductIds)
+                        )
                 );
             } catch (ObjectOptimisticLockingFailureException | OptimisticLockException e) {
                 log.warn("Optimistic lock conflict on checkout attempt {}/{} for user {}: {}",
@@ -82,19 +114,8 @@ public class CheckoutService {
         throw new IllegalStateException("Failed to complete checkout within retry limit");
     }
 
-    protected CheckoutResponse doCheckout(Long userId, String normalizedIdempotencyKey) {
-        // 1. Idempotency Check
-        var existingOrderOpt = orderRepository.findByIdempotencyKey(normalizedIdempotencyKey);
-        if (existingOrderOpt.isPresent()) {
-            Order existingOrder = existingOrderOpt.get();
-            if (!existingOrder.getUser().getId().equals(userId)) {
-                throw new DuplicateRequestException("Idempotency key already used by another user.");
-            }
-            log.info("Replaying existing order {} for idempotency key {}", existingOrder.getOrderNumber(), normalizedIdempotencyKey);
-            return mapToCheckoutResponse(existingOrder);
-        }
-
-        // 2. User & Cart Validation
+    protected CheckoutResponse doCheckout(Long userId, String normalizedIdempotencyKey, List<Long> lockedProductIds) {
+        // User & Cart Validation
         User user = userRepository.findById(userId)
                 .orElseThrow(() -> new ResourceNotFoundException("User", "id", userId));
 
@@ -106,14 +127,24 @@ public class CheckoutService {
             throw new InvalidStateTransitionException("Cannot checkout: Active cart is empty");
         }
 
-        // 3. Calculate subtotal & snapshot prices
+        List<Long> currentProductIds = cartItems.stream()
+                .map(item -> item.getProduct().getId())
+                .distinct()
+                .sorted()
+                .toList();
+
+        if (!currentProductIds.equals(lockedProductIds)) {
+            throw new LockAcquisitionException("Cart items changed concurrently during checkout lock acquisition");
+        }
+
+        // Calculate subtotal & snapshot prices
         BigDecimal totalAmount = BigDecimal.ZERO;
         for (CartItem item : cartItems) {
             BigDecimal itemTotal = item.getProduct().getPrice().multiply(BigDecimal.valueOf(item.getQuantity()));
             totalAmount = totalAmount.add(itemTotal);
         }
 
-        // 4. Create Order initially in CREATED status with normalized (trimmed) idempotency key
+        // Create Order initially in CREATED status with normalized (trimmed) idempotency key
         String orderNumber = "ORD-" + UUID.randomUUID().toString().replace("-", "").substring(0, 12).toUpperCase();
         Order order = Order.builder()
                 .orderNumber(orderNumber)
@@ -123,13 +154,13 @@ public class CheckoutService {
                 .idempotencyKey(normalizedIdempotencyKey)
                 .build();
 
-        // 5. Validate transition CREATED -> PENDING_PAYMENT via strict OrderStateMachine
+        // Validate transition CREATED -> PENDING_PAYMENT via strict OrderStateMachine
         orderStateMachine.validateTransition(OrderStatus.CREATED, OrderStatus.PENDING_PAYMENT);
         order.setStatus(OrderStatus.PENDING_PAYMENT);
 
         Order savedOrder = orderRepository.save(order);
 
-        // 6. Snapshot Order Items
+        // Snapshot Order Items
         List<OrderItem> savedOrderItems = new ArrayList<>();
         for (CartItem cartItem : cartItems) {
             Product product = cartItem.getProduct();
@@ -142,10 +173,10 @@ public class CheckoutService {
             savedOrderItems.add(orderItemRepository.save(orderItem));
         }
 
-        // 7. Real Inventory Reservation via selected locking strategy
+        // Real Inventory Reservation via selected locking strategy
         inventoryLockStrategy.reserveInventory(savedOrder, cartItems);
 
-        // 8. Transition cart to ORDERED (saved_items are completely untouched)
+        // Transition cart to ORDERED (saved_items are completely untouched)
         cart.setStatus(CartStatus.ORDERED);
         cartRepository.save(cart);
 

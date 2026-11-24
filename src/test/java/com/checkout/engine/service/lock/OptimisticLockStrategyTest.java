@@ -11,6 +11,7 @@ import com.checkout.engine.entity.User;
 import com.checkout.engine.exception.InsufficientStockException;
 import com.checkout.engine.repository.InventoryRepository;
 import com.checkout.engine.repository.InventoryReservationRepository;
+import jakarta.persistence.OptimisticLockException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -91,28 +92,7 @@ class OptimisticLockStrategyTest {
     }
 
     @Test
-    void reserveInventory_optimisticLockConflict_retriesAndSucceeds() {
-        // Attempt 1 fails with ObjectOptimisticLockingFailureException, Attempt 2 succeeds
-        when(inventoryRepository.findByProductId(5L)).thenReturn(Optional.of(sampleInventory));
-        when(inventoryRepository.saveAndFlush(any(Inventory.class)))
-                .thenThrow(new ObjectOptimisticLockingFailureException(Inventory.class, 1L))
-                .thenReturn(sampleInventory);
-        when(inventoryReservationRepository.save(any(InventoryReservation.class)))
-                .thenAnswer(inv -> inv.getArgument(0));
-
-        Cart cart = Cart.builder().id(10L).build();
-        CartItem item = CartItem.builder().id(101L).cart(cart).product(sampleProduct).quantity(2).build();
-
-        List<InventoryReservation> reservations = strategy.reserveInventory(sampleOrder, List.of(item));
-
-        assertThat(reservations).hasSize(1);
-        // Verify 2 attempts were made
-        verify(inventoryRepository, times(2)).saveAndFlush(any(Inventory.class));
-    }
-
-    @Test
-    void reserveInventory_exhausts3Attempts_throwsOptimisticLockException() {
-        // All 3 attempts fail with ObjectOptimisticLockingFailureException
+    void reserveInventory_optimisticLockConflict_propagatesExceptionImmediatelyWithoutRetry() {
         when(inventoryRepository.findByProductId(5L)).thenReturn(Optional.of(sampleInventory));
         when(inventoryRepository.saveAndFlush(any(Inventory.class)))
                 .thenThrow(new ObjectOptimisticLockingFailureException(Inventory.class, 1L));
@@ -120,10 +100,26 @@ class OptimisticLockStrategyTest {
         Cart cart = Cart.builder().id(10L).build();
         CartItem item = CartItem.builder().id(101L).cart(cart).product(sampleProduct).quantity(2).build();
 
+        // Must propagate ObjectOptimisticLockingFailureException out immediately without inner retry loop
         assertThatThrownBy(() -> strategy.reserveInventory(sampleOrder, List.of(item)))
                 .isInstanceOf(ObjectOptimisticLockingFailureException.class);
 
-        // Exactly 3 attempts before giving up
-        verify(inventoryRepository, times(3)).saveAndFlush(any(Inventory.class));
+        verify(inventoryRepository, times(1)).saveAndFlush(any(Inventory.class));
+    }
+
+    @Test
+    void reserveInventory_jpaOptimisticLockException_propagatesExceptionImmediatelyWithoutRetry() {
+        when(inventoryRepository.findByProductId(5L)).thenReturn(Optional.of(sampleInventory));
+        when(inventoryRepository.saveAndFlush(any(Inventory.class)))
+                .thenThrow(new OptimisticLockException("Row updated by another transaction"));
+
+        Cart cart = Cart.builder().id(10L).build();
+        CartItem item = CartItem.builder().id(101L).cart(cart).product(sampleProduct).quantity(2).build();
+
+        // Must propagate OptimisticLockException out immediately without inner retry loop
+        assertThatThrownBy(() -> strategy.reserveInventory(sampleOrder, List.of(item)))
+                .isInstanceOf(OptimisticLockException.class);
+
+        verify(inventoryRepository, times(1)).saveAndFlush(any(Inventory.class));
     }
 }

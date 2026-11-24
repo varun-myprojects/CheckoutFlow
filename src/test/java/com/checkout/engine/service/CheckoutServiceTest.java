@@ -12,6 +12,7 @@ import com.checkout.engine.entity.User;
 import com.checkout.engine.exception.DuplicateRequestException;
 import com.checkout.engine.exception.InsufficientStockException;
 import com.checkout.engine.exception.InvalidStateTransitionException;
+import com.checkout.engine.exception.LockAcquisitionException;
 import com.checkout.engine.repository.CartItemRepository;
 import com.checkout.engine.repository.CartRepository;
 import com.checkout.engine.repository.OrderItemRepository;
@@ -38,6 +39,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -80,6 +82,12 @@ class CheckoutServiceTest {
 
     @BeforeEach
     void setUp() {
+        lenient().when(inventoryLockStrategy.executeWithDistributedLock(any(), any()))
+                .thenAnswer(invocation -> {
+                    java.util.function.Supplier<?> action = invocation.getArgument(1);
+                    return action.get();
+                });
+
         sampleUser = User.builder()
                 .id(1L)
                 .email("john.doe@example.com")
@@ -336,5 +344,66 @@ class CheckoutServiceTest {
         assertThat(response.getOrderId()).isEqualTo(999L);
         // Verify reserveInventory was retried (called twice)
         verify(inventoryLockStrategy, times(2)).reserveInventory(any(Order.class), any());
+    }
+
+    @Test
+    void checkout_exhausts3OuterAttempts_throwsObjectOptimisticLockingFailureException() {
+        when(orderRepository.findByIdempotencyKey("KEY-EXHAUST")).thenReturn(Optional.empty());
+        when(userRepository.findById(1L)).thenReturn(Optional.of(sampleUser));
+        when(cartRepository.findByUserIdAndStatus(1L, CartStatus.ACTIVE)).thenReturn(Optional.of(sampleCart));
+        when(cartItemRepository.findByCartId(50L)).thenReturn(List.of(sampleCartItem));
+
+        Order savedOrder = Order.builder()
+                .id(999L)
+                .orderNumber("ORD-EXHAUST")
+                .user(sampleUser)
+                .status(OrderStatus.PENDING_PAYMENT)
+                .totalAmount(BigDecimal.valueOf(4000.00))
+                .idempotencyKey("KEY-EXHAUST")
+                .build();
+        savedOrder.setCreatedAt(Instant.now());
+
+        when(orderRepository.save(any(Order.class))).thenReturn(savedOrder);
+
+        OrderItem savedOrderItem = OrderItem.builder()
+                .id(1L)
+                .order(savedOrder)
+                .product(sampleProduct)
+                .quantity(2)
+                .price(BigDecimal.valueOf(2000.00))
+                .build();
+
+        when(orderItemRepository.save(any(OrderItem.class))).thenReturn(savedOrderItem);
+
+        when(inventoryLockStrategy.reserveInventory(any(Order.class), any()))
+                .thenThrow(new ObjectOptimisticLockingFailureException(Product.class, 10L));
+
+        assertThatThrownBy(() -> checkoutService.checkout(1L, "KEY-EXHAUST"))
+                .isInstanceOf(ObjectOptimisticLockingFailureException.class);
+
+        verify(inventoryLockStrategy, times(3)).reserveInventory(any(Order.class), any());
+    }
+
+    @Test
+    void checkout_cartItemsChangedDuringLockAcquisition_throwsLockAcquisitionException() {
+        when(orderRepository.findByIdempotencyKey("KEY-CHANGED")).thenReturn(Optional.empty());
+        when(userRepository.findById(1L)).thenReturn(Optional.of(sampleUser));
+        when(cartRepository.findByUserIdAndStatus(1L, CartStatus.ACTIVE)).thenReturn(Optional.of(sampleCart));
+
+        // Pre-lookup returns product 10
+        // Inside transaction, cart has product 20 (changed concurrently)
+        Product changedProduct = Product.builder().id(20L).sku("SKU-CHANGED").price(BigDecimal.TEN).build();
+        CartItem changedCartItem = CartItem.builder().id(502L).cart(sampleCart).product(changedProduct).quantity(1).build();
+
+        when(cartItemRepository.findByCartId(50L))
+                .thenReturn(List.of(sampleCartItem))
+                .thenReturn(List.of(changedCartItem));
+
+        assertThatThrownBy(() -> checkoutService.checkout(1L, "KEY-CHANGED"))
+                .isInstanceOf(LockAcquisitionException.class)
+                .hasMessageContaining("Cart items changed concurrently during checkout lock acquisition");
+
+        verify(orderRepository, never()).save(any());
+        verify(inventoryLockStrategy, never()).reserveInventory(any(), any());
     }
 }

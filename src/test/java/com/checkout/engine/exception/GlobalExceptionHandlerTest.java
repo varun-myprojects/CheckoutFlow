@@ -1,9 +1,11 @@
 package com.checkout.engine.exception;
 
+import jakarta.persistence.OptimisticLockException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.MediaType;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -52,6 +54,21 @@ class GlobalExceptionHandlerTest {
         @GetMapping("/db-conflict")
         public String testDbConflict() {
             throw new DataIntegrityViolationException("Duplicate entry 'chk-123' for key 'orders.uk_orders_idempotency_key'");
+        }
+
+        @GetMapping("/lock-timeout")
+        public String testLockTimeout() {
+            throw new LockAcquisitionException("Could not acquire inventory lock for product: 5");
+        }
+
+        @GetMapping("/optimistic-spring")
+        public String testOptimisticSpring() {
+            throw new ObjectOptimisticLockingFailureException("Inventory", 5L);
+        }
+
+        @GetMapping("/optimistic-jpa")
+        public String testOptimisticJpa() {
+            throw new OptimisticLockException("Row was updated or deleted by another transaction");
         }
 
         @GetMapping("/secret-error")
@@ -130,5 +147,32 @@ class GlobalExceptionHandlerTest {
                 .andExpect(jsonPath("$.error").value("Internal Server Error"))
                 .andExpect(jsonPath("$.message").value("An unexpected internal error occurred. Please try again later."))
                 .andExpect(jsonPath("$.message", not(containsString("secret db error"))));
+    }
+
+    @Test
+    void lockAcquisitionException_returns503_serviceUnavailable() throws Exception {
+        mockMvc.perform(get("/test/lock-timeout"))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.status").value(503))
+                .andExpect(jsonPath("$.error").value("Service Unavailable"))
+                .andExpect(jsonPath("$.message", containsString("Could not acquire inventory lock for product: 5")));
+    }
+
+    @Test
+    void objectOptimisticLockingFailureException_returns409_conflict() throws Exception {
+        mockMvc.perform(get("/test/optimistic-spring"))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.status").value(409))
+                .andExpect(jsonPath("$.error").value("Conflict"))
+                .andExpect(jsonPath("$.message", containsString("concurrent update conflict")));
+    }
+
+    @Test
+    void optimisticLockException_returns409_conflict() throws Exception {
+        mockMvc.perform(get("/test/optimistic-jpa"))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.status").value(409))
+                .andExpect(jsonPath("$.error").value("Conflict"))
+                .andExpect(jsonPath("$.message", containsString("concurrent update conflict")));
     }
 }

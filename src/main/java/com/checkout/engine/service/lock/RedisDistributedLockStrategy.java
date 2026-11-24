@@ -7,6 +7,7 @@ import com.checkout.engine.entity.Order;
 import com.checkout.engine.entity.Product;
 import com.checkout.engine.entity.ReservationStatus;
 import com.checkout.engine.exception.InsufficientStockException;
+import com.checkout.engine.exception.LockAcquisitionException;
 import com.checkout.engine.exception.ResourceNotFoundException;
 import com.checkout.engine.repository.InventoryRepository;
 import com.checkout.engine.repository.InventoryReservationRepository;
@@ -16,7 +17,6 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.stereotype.Component;
-import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -26,6 +26,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.UUID;
+import java.util.function.Supplier;
 
 @Slf4j
 @Component("redisDistributedLockStrategy")
@@ -59,76 +60,86 @@ public class RedisDistributedLockStrategy implements InventoryLockStrategy {
     }
 
     @Override
-    @Transactional
-    public List<InventoryReservation> reserveInventory(Order order, List<CartItem> cartItems) {
+    public <T> T executeWithDistributedLock(List<Long> productIds, Supplier<T> transactionalAction) {
         if (redisTemplate == null) {
             throw new IllegalStateException("Redis is not configured or StringRedisTemplate is unavailable");
         }
 
-        // Sort cart items by product ID in ascending order to prevent distributed deadlocks
-        List<CartItem> sortedItems = cartItems.stream()
-                .sorted(Comparator.comparing(item -> item.getProduct().getId()))
+        // Deduplicate and sort product IDs in ascending order to prevent distributed deadlocks
+        List<Long> sortedProductIds = productIds.stream()
+                .distinct()
+                .sorted()
                 .toList();
 
         String lockOwnerToken = UUID.randomUUID().toString();
         List<String> acquiredLockKeys = new ArrayList<>();
 
         try {
-            // Acquire Redis locks in ascending product order
-            for (CartItem item : sortedItems) {
-                String lockKey = LOCK_KEY_PREFIX + item.getProduct().getId();
+            // Acquire Redis locks in ascending product order before entering DB transaction
+            for (Long productId : sortedProductIds) {
+                String lockKey = LOCK_KEY_PREFIX + productId;
                 boolean acquired = acquireLockWithRetry(lockKey, lockOwnerToken, LOCK_LEASE_TIME, LOCK_ACQUISITION_TIMEOUT_MS);
                 if (!acquired) {
                     log.error("Failed to acquire Redis distributed lock for key {} within {} ms",
                             lockKey, LOCK_ACQUISITION_TIMEOUT_MS);
-                    throw new IllegalStateException("Could not acquire inventory lock for product: " + item.getProduct().getId());
+                    throw new LockAcquisitionException("Could not acquire inventory lock for product: " + productId);
                 }
                 acquiredLockKeys.add(lockKey);
             }
 
-            // Perform DB update within protected critical section
-            List<InventoryReservation> reservations = new ArrayList<>();
-            Instant expiresAt = Instant.now().plus(10, ChronoUnit.MINUTES);
-
-            for (CartItem item : sortedItems) {
-                Product product = item.getProduct();
-                Long productId = product.getId();
-                int requestedQty = item.getQuantity();
-
-                Inventory inventory = inventoryRepository.findByProductId(productId)
-                        .orElseThrow(() -> new ResourceNotFoundException("Inventory", "productId", productId));
-
-                if (inventory.getAvailableQty() < requestedQty) {
-                    log.warn("Insufficient stock for product {}. Requested: {}, Available: {}",
-                            product.getSku(), requestedQty, inventory.getAvailableQty());
-                    throw new InsufficientStockException(product.getSku(), requestedQty, inventory.getAvailableQty());
-                }
-
-                inventory.setAvailableQty(inventory.getAvailableQty() - requestedQty);
-                inventory.setReservedQty(inventory.getReservedQty() + requestedQty);
-                inventoryRepository.save(inventory);
-
-                InventoryReservation reservation = InventoryReservation.builder()
-                        .order(order)
-                        .product(product)
-                        .quantity(requestedQty)
-                        .status(ReservationStatus.ACTIVE)
-                        .expiresAt(expiresAt)
-                        .build();
-
-                reservations.add(inventoryReservationRepository.save(reservation));
-                log.info("Reserved {} units of product {} for order {} under Redis distributed lock",
-                        requestedQty, product.getSku(), order.getOrderNumber());
-            }
-
-            return reservations;
+            // Execute the transactional callback while distributed locks are held
+            return transactionalAction.get();
 
         } finally {
-            // Atomically release all acquired Redis locks via Lua script validating owner token
+            // Atomically release all acquired Redis locks via Lua script validating owner token AFTER transaction completes
             for (String lockKey : acquiredLockKeys) {
                 releaseLock(lockKey, lockOwnerToken);
             }
         }
+    }
+
+    @Override
+    public List<InventoryReservation> reserveInventory(Order order, List<CartItem> cartItems) {
+        // Sort cart items by product ID in ascending order for consistent processing
+        List<CartItem> sortedItems = cartItems.stream()
+                .sorted(Comparator.comparing(item -> item.getProduct().getId()))
+                .toList();
+
+        List<InventoryReservation> reservations = new ArrayList<>();
+        Instant expiresAt = Instant.now().plus(10, ChronoUnit.MINUTES);
+
+        for (CartItem item : sortedItems) {
+            Product product = item.getProduct();
+            Long productId = product.getId();
+            int requestedQty = item.getQuantity();
+
+            Inventory inventory = inventoryRepository.findByProductId(productId)
+                    .orElseThrow(() -> new ResourceNotFoundException("Inventory", "productId", productId));
+
+            if (inventory.getAvailableQty() < requestedQty) {
+                log.warn("Insufficient stock for product {}. Requested: {}, Available: {}",
+                        product.getSku(), requestedQty, inventory.getAvailableQty());
+                throw new InsufficientStockException(product.getSku(), requestedQty, inventory.getAvailableQty());
+            }
+
+            inventory.setAvailableQty(inventory.getAvailableQty() - requestedQty);
+            inventory.setReservedQty(inventory.getReservedQty() + requestedQty);
+            inventoryRepository.save(inventory);
+
+            InventoryReservation reservation = InventoryReservation.builder()
+                    .order(order)
+                    .product(product)
+                    .quantity(requestedQty)
+                    .status(ReservationStatus.ACTIVE)
+                    .expiresAt(expiresAt)
+                    .build();
+
+            reservations.add(inventoryReservationRepository.save(reservation));
+            log.info("Reserved {} units of product {} for order {} under Redis distributed lock",
+                    requestedQty, product.getSku(), order.getOrderNumber());
+        }
+
+        return reservations;
     }
 
     private boolean acquireLockWithRetry(String lockKey, String lockToken, Duration leaseTime, long timeoutMs) {
@@ -143,7 +154,7 @@ public class RedisDistributedLockStrategy implements InventoryLockStrategy {
                 Thread.sleep(RETRY_INTERVAL_MS);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                throw new IllegalStateException("Interrupted while waiting for Redis lock: " + lockKey, e);
+                throw new LockAcquisitionException("Interrupted while waiting for Redis lock: " + lockKey, e);
             }
         }
         return false;
