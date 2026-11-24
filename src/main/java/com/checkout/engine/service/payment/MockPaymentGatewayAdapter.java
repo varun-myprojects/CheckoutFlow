@@ -7,18 +7,16 @@ import com.checkout.engine.dto.PaymentInitiationResult;
 import com.checkout.engine.dto.RefundRequest;
 import com.checkout.engine.dto.RefundResult;
 import com.checkout.engine.entity.Order;
-import com.checkout.engine.entity.OrderStatus;
 import com.checkout.engine.entity.PaymentStatus;
 import com.checkout.engine.entity.PaymentTransaction;
 import com.checkout.engine.exception.ResourceNotFoundException;
 import com.checkout.engine.repository.OrderRepository;
 import com.checkout.engine.repository.PaymentTransactionRepository;
-import com.checkout.engine.service.OrderStateMachine;
-import lombok.RequiredArgsConstructor;
+import com.checkout.engine.service.PaymentWebhookService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
-import org.springframework.transaction.annotation.Transactional;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
@@ -29,7 +27,6 @@ import java.util.UUID;
 
 @Slf4j
 @Component("mockPaymentGatewayAdapter")
-@RequiredArgsConstructor
 public class MockPaymentGatewayAdapter implements PaymentGateway {
 
     public static final String GATEWAY_NAME = "MOCK";
@@ -43,7 +40,17 @@ public class MockPaymentGatewayAdapter implements PaymentGateway {
 
     private final PaymentTransactionRepository paymentTransactionRepository;
     private final OrderRepository orderRepository;
-    private final OrderStateMachine orderStateMachine;
+    private final PaymentWebhookService paymentWebhookService;
+
+    public MockPaymentGatewayAdapter(
+            PaymentTransactionRepository paymentTransactionRepository,
+            OrderRepository orderRepository,
+            @Lazy PaymentWebhookService paymentWebhookService
+    ) {
+        this.paymentTransactionRepository = paymentTransactionRepository;
+        this.orderRepository = orderRepository;
+        this.paymentWebhookService = paymentWebhookService;
+    }
 
     @Override
     public PaymentInitiationResult initiatePayment(PaymentInitiationRequest request) {
@@ -109,10 +116,11 @@ public class MockPaymentGatewayAdapter implements PaymentGateway {
     }
 
     /**
-     * Deterministically simulates gateway webhook callbacks with support for SUCCESS, FAILURE,
-     * artificial latency, and duplicate webhook replays.
+     * Deterministically simulates gateway webhook callbacks without holding a DB connection.
+     * Generates a signed webhook payload with a consistent providerEventId across the replayCount loop
+     * and dispatches each attempt through PaymentWebhookService so tests verify real HMAC verification,
+     * idempotency table persistence, and inventory reservation consumption/release.
      */
-    @Transactional
     public MockWebhookSimulationResponse simulateWebhook(MockWebhookSimulationRequest request) {
         Long delay = request.getEffectiveLatencyMs();
         if (delay != null && delay > 0) {
@@ -126,69 +134,61 @@ public class MockPaymentGatewayAdapter implements PaymentGateway {
         }
 
         PaymentTransaction transaction;
+        Order order;
         if (request.getTransactionReference() != null && !request.getTransactionReference().isBlank()) {
             transaction = paymentTransactionRepository.findByTransactionReference(request.getTransactionReference())
                     .orElseThrow(() -> new ResourceNotFoundException("PaymentTransaction", "transactionReference", request.getTransactionReference()));
+            order = orderRepository.findById(transaction.getOrder().getId())
+                    .orElseThrow(() -> new ResourceNotFoundException("Order", "id", transaction.getOrder().getId()));
         } else if (request.getOrderId() != null) {
+            order = orderRepository.findById(request.getOrderId())
+                    .orElseThrow(() -> new ResourceNotFoundException("Order", "id", request.getOrderId()));
             var txns = paymentTransactionRepository.findByOrderId(request.getOrderId());
             if (txns.isEmpty()) {
                 throw new ResourceNotFoundException("PaymentTransaction", "orderId", request.getOrderId());
             }
             transaction = txns.get(txns.size() - 1);
         } else if (request.getOrderNumber() != null && !request.getOrderNumber().isBlank()) {
-            Order ord = orderRepository.findByOrderNumber(request.getOrderNumber())
+            order = orderRepository.findByOrderNumber(request.getOrderNumber())
                     .orElseThrow(() -> new ResourceNotFoundException("Order", "orderNumber", request.getOrderNumber()));
-            var txns = paymentTransactionRepository.findByOrderId(ord.getId());
+            var txns = paymentTransactionRepository.findByOrderId(order.getId());
             if (txns.isEmpty()) {
-                throw new ResourceNotFoundException("PaymentTransaction", "orderId", ord.getId());
+                throw new ResourceNotFoundException("PaymentTransaction", "orderId", order.getId());
             }
             transaction = txns.get(txns.size() - 1);
         } else {
             throw new IllegalArgumentException("Either transactionReference, orderId, or orderNumber must be provided");
         }
-
-        Order order = transaction.getOrder();
         boolean isSuccess = "SUCCESS".equalsIgnoreCase(request.getEffectiveStatus());
         int replays = request.getReplayCount() != null && request.getReplayCount() > 0 ? request.getReplayCount() : 1;
 
-        for (int i = 0; i < replays; i++) {
-            if (isSuccess) {
-                if (transaction.getStatus() != PaymentStatus.CAPTURED) {
-                    transaction.setStatus(PaymentStatus.CAPTURED);
-                    paymentTransactionRepository.save(transaction);
-                }
-                if (order.getStatus() == OrderStatus.PENDING_PAYMENT) {
-                    orderStateMachine.validateTransition(order.getStatus(), OrderStatus.CONFIRMED);
-                    order.setStatus(OrderStatus.CONFIRMED);
-                    orderRepository.save(order);
-                }
-            } else {
-                if (transaction.getStatus() != PaymentStatus.FAILED) {
-                    transaction.setStatus(PaymentStatus.FAILED);
-                    paymentTransactionRepository.save(transaction);
-                }
-                if (order.getStatus() == OrderStatus.PENDING_PAYMENT) {
-                    orderStateMachine.validateTransition(order.getStatus(), OrderStatus.FAILED);
-                    order.setStatus(OrderStatus.FAILED);
-                    orderRepository.save(order);
-                }
-            }
-        }
-
+        String providerEventId = "mock_evt_" + UUID.randomUUID().toString().replace("-", "").substring(0, 16);
         String webhookEvent = isSuccess ? "payment.captured" : "payment.failed";
-        String payload = String.format("{\"event\":\"%s\",\"transactionReference\":\"%s\",\"orderNumber\":\"%s\",\"status\":\"%s\"}",
-                webhookEvent, transaction.getTransactionReference(), order.getOrderNumber(), transaction.getStatus());
+        String status = isSuccess ? "SUCCESS" : "FAILURE";
+
+        String payload = String.format(
+                "{\"providerEventId\":\"%s\",\"event\":\"%s\",\"transactionReference\":\"%s\",\"orderNumber\":\"%s\",\"orderId\":%d,\"status\":\"%s\"}",
+                providerEventId, webhookEvent, transaction.getTransactionReference(), order.getOrderNumber(), order.getId(), status
+        );
         String signature = calculateHmacSha256(payload, webhookSecret);
 
+        for (int i = 0; i < replays; i++) {
+            paymentWebhookService.processWebhook(payload, signature);
+        }
+
+        // Fetch refreshed entities from repository
+        Order updatedOrder = orderRepository.findById(order.getId()).orElse(order);
+        PaymentTransaction updatedTxn = paymentTransactionRepository.findById(transaction.getId()).orElse(transaction);
+
         log.info("Simulated mock webhook (replays={}): txnRef={}, paymentStatus={}, orderStatus={}",
-                replays, transaction.getTransactionReference(), transaction.getStatus(), order.getStatus());
+                replays, updatedTxn.getTransactionReference(), updatedTxn.getStatus(), updatedOrder.getStatus());
 
         return MockWebhookSimulationResponse.builder()
-                .transactionReference(transaction.getTransactionReference())
-                .orderId(order.getId())
-                .orderNumber(order.getOrderNumber())
-                .paymentStatus(transaction.getStatus())
-                .orderStatus(order.getStatus())
+                .transactionReference(updatedTxn.getTransactionReference())
+                .orderId(updatedOrder.getId())
+                .orderNumber(updatedOrder.getOrderNumber())
+                .paymentStatus(updatedTxn.getStatus())
+                .orderStatus(updatedOrder.getStatus())
                 .webhookEvent(webhookEvent)
                 .signature(signature)
                 .processedCount(replays)

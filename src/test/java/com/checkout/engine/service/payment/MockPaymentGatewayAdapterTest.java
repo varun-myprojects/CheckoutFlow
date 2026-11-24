@@ -12,13 +12,12 @@ import com.checkout.engine.entity.PaymentStatus;
 import com.checkout.engine.entity.PaymentTransaction;
 import com.checkout.engine.repository.OrderRepository;
 import com.checkout.engine.repository.PaymentTransactionRepository;
-import com.checkout.engine.service.OrderStateMachine;
+import com.checkout.engine.service.PaymentWebhookService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
-import org.mockito.Spy;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.math.BigDecimal;
@@ -26,6 +25,8 @@ import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -38,8 +39,8 @@ class MockPaymentGatewayAdapterTest {
     @Mock
     private OrderRepository orderRepository;
 
-    @Spy
-    private OrderStateMachine orderStateMachine = new OrderStateMachine();
+    @Mock
+    private PaymentWebhookService paymentWebhookService;
 
     @InjectMocks
     private MockPaymentGatewayAdapter adapter;
@@ -115,53 +116,34 @@ class MockPaymentGatewayAdapterTest {
     }
 
     @Test
-    void simulateWebhook_success_transitionsToCapturedAndConfirmed() {
+    void simulateWebhook_dispatchesToPaymentWebhookService() {
         when(paymentTransactionRepository.findByTransactionReference("mock_txn_1234567890abcdef"))
                 .thenReturn(Optional.of(sampleTransaction));
+        when(orderRepository.findById(100L)).thenReturn(Optional.of(sampleOrder));
+        when(paymentTransactionRepository.findById(200L)).thenReturn(Optional.of(sampleTransaction));
 
         MockWebhookSimulationRequest request = MockWebhookSimulationRequest.builder()
                 .transactionReference("mock_txn_1234567890abcdef")
                 .status("SUCCESS")
-                .latencyMs(10L)
-                .replayCount(1)
-                .build();
-
-        MockWebhookSimulationResponse response = adapter.simulateWebhook(request);
-
-        assertThat(response.getPaymentStatus()).isEqualTo(PaymentStatus.CAPTURED);
-        assertThat(response.getOrderStatus()).isEqualTo(OrderStatus.CONFIRMED);
-        assertThat(response.getSignature()).isNotBlank();
-        assertThat(response.getProcessedCount()).isEqualTo(1);
-
-        verify(paymentTransactionRepository).save(sampleTransaction);
-        verify(orderRepository).save(sampleOrder);
-    }
-
-    @Test
-    void simulateWebhook_failure_transitionsToFailedAndFailed() {
-        when(paymentTransactionRepository.findByTransactionReference("mock_txn_1234567890abcdef"))
-                .thenReturn(Optional.of(sampleTransaction));
-
-        MockWebhookSimulationRequest request = MockWebhookSimulationRequest.builder()
-                .transactionReference("mock_txn_1234567890abcdef")
-                .status("FAILURE")
                 .latencyMs(0L)
                 .replayCount(1)
                 .build();
 
         MockWebhookSimulationResponse response = adapter.simulateWebhook(request);
 
-        assertThat(response.getPaymentStatus()).isEqualTo(PaymentStatus.FAILED);
-        assertThat(response.getOrderStatus()).isEqualTo(OrderStatus.FAILED);
+        assertThat(response.getTransactionReference()).isEqualTo("mock_txn_1234567890abcdef");
+        assertThat(response.getSignature()).isNotBlank();
+        assertThat(response.getProcessedCount()).isEqualTo(1);
 
-        verify(paymentTransactionRepository).save(sampleTransaction);
-        verify(orderRepository).save(sampleOrder);
+        verify(paymentWebhookService).processWebhook(anyString(), anyString());
     }
 
     @Test
-    void simulateWebhook_duplicateReplay_isIdempotent() {
+    void simulateWebhook_replays_dispatchesMultipleTimesWithSamePayload() {
         when(paymentTransactionRepository.findByTransactionReference("mock_txn_1234567890abcdef"))
                 .thenReturn(Optional.of(sampleTransaction));
+        when(orderRepository.findById(100L)).thenReturn(Optional.of(sampleOrder));
+        when(paymentTransactionRepository.findById(200L)).thenReturn(Optional.of(sampleTransaction));
 
         MockWebhookSimulationRequest request = MockWebhookSimulationRequest.builder()
                 .transactionReference("mock_txn_1234567890abcdef")
@@ -172,8 +154,7 @@ class MockPaymentGatewayAdapterTest {
 
         MockWebhookSimulationResponse response = adapter.simulateWebhook(request);
 
-        assertThat(response.getPaymentStatus()).isEqualTo(PaymentStatus.CAPTURED);
-        assertThat(response.getOrderStatus()).isEqualTo(OrderStatus.CONFIRMED);
         assertThat(response.getProcessedCount()).isEqualTo(3);
+        verify(paymentWebhookService, times(3)).processWebhook(anyString(), anyString());
     }
 }

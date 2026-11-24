@@ -7,6 +7,7 @@ import com.checkout.engine.repository.InventoryReservationRepository;
 import com.checkout.engine.repository.OrderItemRepository;
 import com.checkout.engine.repository.OrderRepository;
 import com.checkout.engine.repository.PaymentTransactionRepository;
+import com.checkout.engine.repository.ProcessedWebhookEventRepository;
 import com.checkout.engine.repository.ProductRepository;
 import com.checkout.engine.repository.SavedItemRepository;
 import com.checkout.engine.repository.UserRepository;
@@ -46,6 +47,9 @@ class CheckoutEngineApplicationTests {
 
     @MockBean
     private PaymentTransactionRepository paymentTransactionRepository;
+
+    @MockBean
+    private ProcessedWebhookEventRepository processedWebhookEventRepository;
 
     @Test
     void contextLoads() {

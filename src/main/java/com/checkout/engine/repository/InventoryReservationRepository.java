@@ -11,6 +11,7 @@ import java.util.List;
 @Repository
 public interface InventoryReservationRepository extends JpaRepository<InventoryReservation, Long> {
     List<InventoryReservation> findByOrderId(Long orderId);
+    List<InventoryReservation> findByOrderIdAndStatus(Long orderId, ReservationStatus status);
     List<InventoryReservation> findByStatusAndExpiresAtBefore(ReservationStatus status, Instant now);
     List<InventoryReservation> findByProductIdAndStatus(Long productId, ReservationStatus status);
 }
