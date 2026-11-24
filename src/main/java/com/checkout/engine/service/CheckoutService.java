@@ -5,26 +5,25 @@ import com.checkout.engine.dto.OrderItemResponse;
 import com.checkout.engine.entity.Cart;
 import com.checkout.engine.entity.CartItem;
 import com.checkout.engine.entity.CartStatus;
-import com.checkout.engine.entity.Inventory;
 import com.checkout.engine.entity.Order;
 import com.checkout.engine.entity.OrderItem;
 import com.checkout.engine.entity.OrderStatus;
 import com.checkout.engine.entity.Product;
 import com.checkout.engine.entity.User;
 import com.checkout.engine.exception.DuplicateRequestException;
-import com.checkout.engine.exception.InsufficientStockException;
 import com.checkout.engine.exception.InvalidStateTransitionException;
 import com.checkout.engine.exception.ResourceNotFoundException;
 import com.checkout.engine.repository.CartItemRepository;
 import com.checkout.engine.repository.CartRepository;
-import com.checkout.engine.repository.InventoryRepository;
 import com.checkout.engine.repository.OrderItemRepository;
 import com.checkout.engine.repository.OrderRepository;
 import com.checkout.engine.repository.UserRepository;
+import com.checkout.engine.service.lock.InventoryLockStrategy;
+import jakarta.persistence.OptimisticLockException;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
@@ -36,29 +35,62 @@ import java.util.UUID;
 @RequiredArgsConstructor
 public class CheckoutService {
 
+    private static final int MAX_CHECKOUT_ATTEMPTS = 3;
+    private static final long RETRY_BACKOFF_MS = 50L;
+
     private final UserRepository userRepository;
     private final CartRepository cartRepository;
     private final CartItemRepository cartItemRepository;
     private final OrderRepository orderRepository;
     private final OrderItemRepository orderItemRepository;
-    private final InventoryRepository inventoryRepository;
+    private final InventoryLockStrategy inventoryLockStrategy;
     private final OrderStateMachine orderStateMachine;
+    private final CheckoutTransactionRunner checkoutTransactionRunner;
 
-    @Transactional
     public CheckoutResponse checkout(Long userId, String idempotencyKey) {
-        // 0. Validate Idempotency-Key
+        // 0. Validate and normalize Idempotency-Key
         if (idempotencyKey == null || idempotencyKey.isBlank()) {
             throw new IllegalArgumentException("Idempotency-Key header must not be blank");
         }
+        String normalizedIdempotencyKey = idempotencyKey.trim();
 
+        // Retry loop for optimistic lock conflicts, with a fresh transaction per attempt
+        for (int attempt = 1; attempt <= MAX_CHECKOUT_ATTEMPTS; attempt++) {
+            try {
+                return checkoutTransactionRunner.runInTransaction(() ->
+                        doCheckout(userId, normalizedIdempotencyKey)
+                );
+            } catch (ObjectOptimisticLockingFailureException | OptimisticLockException e) {
+                log.warn("Optimistic lock conflict on checkout attempt {}/{} for user {}: {}",
+                        attempt, MAX_CHECKOUT_ATTEMPTS, userId, e.getMessage());
+
+                if (attempt >= MAX_CHECKOUT_ATTEMPTS) {
+                    log.error("Exhausted all {} retry attempts for user {} due to optimistic lock contention",
+                            MAX_CHECKOUT_ATTEMPTS, userId);
+                    throw e;
+                }
+
+                try {
+                    Thread.sleep(RETRY_BACKOFF_MS * attempt);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException("Interrupted during optimistic checkout retry", ie);
+                }
+            }
+        }
+
+        throw new IllegalStateException("Failed to complete checkout within retry limit");
+    }
+
+    protected CheckoutResponse doCheckout(Long userId, String normalizedIdempotencyKey) {
         // 1. Idempotency Check
-        var existingOrderOpt = orderRepository.findByIdempotencyKey(idempotencyKey.trim());
+        var existingOrderOpt = orderRepository.findByIdempotencyKey(normalizedIdempotencyKey);
         if (existingOrderOpt.isPresent()) {
             Order existingOrder = existingOrderOpt.get();
             if (!existingOrder.getUser().getId().equals(userId)) {
                 throw new DuplicateRequestException("Idempotency key already used by another user.");
             }
-            log.info("Replaying existing order {} for idempotency key {}", existingOrder.getOrderNumber(), idempotencyKey);
+            log.info("Replaying existing order {} for idempotency key {}", existingOrder.getOrderNumber(), normalizedIdempotencyKey);
             return mapToCheckoutResponse(existingOrder);
         }
 
@@ -81,14 +113,14 @@ public class CheckoutService {
             totalAmount = totalAmount.add(itemTotal);
         }
 
-        // 4. Create Order initially in CREATED status
+        // 4. Create Order initially in CREATED status with normalized (trimmed) idempotency key
         String orderNumber = "ORD-" + UUID.randomUUID().toString().replace("-", "").substring(0, 12).toUpperCase();
         Order order = Order.builder()
                 .orderNumber(orderNumber)
                 .user(user)
                 .status(OrderStatus.CREATED)
                 .totalAmount(totalAmount)
-                .idempotencyKey(idempotencyKey)
+                .idempotencyKey(normalizedIdempotencyKey)
                 .build();
 
         // 5. Validate transition CREATED -> PENDING_PAYMENT via strict OrderStateMachine
@@ -110,8 +142,8 @@ public class CheckoutService {
             savedOrderItems.add(orderItemRepository.save(orderItem));
         }
 
-        // 7. Stub Inventory Deduction cleanly
-        stubInventoryDeduction(cartItems);
+        // 7. Real Inventory Reservation via selected locking strategy
+        inventoryLockStrategy.reserveInventory(savedOrder, cartItems);
 
         // 8. Transition cart to ORDERED (saved_items are completely untouched)
         cart.setStatus(CartStatus.ORDERED);
@@ -121,24 +153,6 @@ public class CheckoutService {
                 savedOrder.getOrderNumber(), userId, savedOrder.getStatus());
 
         return mapToCheckoutResponse(savedOrder, savedOrderItems);
-    }
-
-    /**
-     * Stubbed inventory deduction: validates stock availability.
-     * Actual inventory deduction, reservation tokens, and concurrency locking belong to the next commit.
-     */
-    protected void stubInventoryDeduction(List<CartItem> cartItems) {
-        for (CartItem item : cartItems) {
-            Product product = item.getProduct();
-            Inventory inventory = inventoryRepository.findByProductId(product.getId())
-                    .orElseThrow(() -> new ResourceNotFoundException("Inventory", "productId", product.getId()));
-
-            if (inventory.getAvailableQty() < item.getQuantity()) {
-                throw new InsufficientStockException(product.getSku(), item.getQuantity(), inventory.getAvailableQty());
-            }
-
-            log.debug("Inventory stock validated for product {} with required quantity {}", product.getSku(), item.getQuantity());
-        }
     }
 
     private CheckoutResponse mapToCheckoutResponse(Order order) {
