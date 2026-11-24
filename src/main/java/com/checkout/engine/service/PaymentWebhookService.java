@@ -14,6 +14,10 @@ import com.checkout.engine.entity.ProcessedWebhookEvent;
 import com.checkout.engine.entity.ReservationStatus;
 import com.checkout.engine.exception.InvalidWebhookSignatureException;
 import com.checkout.engine.exception.ResourceNotFoundException;
+import com.checkout.engine.dto.event.OrderEventPayload;
+import com.checkout.engine.entity.OutboxEvent;
+import com.checkout.engine.entity.OutboxStatus;
+import com.checkout.engine.repository.OutboxEventRepository;
 import com.checkout.engine.repository.InventoryRepository;
 import com.checkout.engine.repository.InventoryReservationRepository;
 import com.checkout.engine.repository.OrderRepository;
@@ -28,6 +32,7 @@ import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Instant;
 import java.util.Comparator;
 import java.util.List;
 
@@ -45,6 +50,7 @@ public class PaymentWebhookService {
     private final OrderStateMachine orderStateMachine;
     private final ObjectMapper objectMapper;
     private final CacheService cacheService;
+    private final OutboxEventRepository outboxEventRepository;
 
     /**
      * Processes an incoming payment webhook callback:
@@ -167,6 +173,33 @@ public class PaymentWebhookService {
         order.setStatus(OrderStatus.CONFIRMED);
         orderRepository.save(order);
 
+        // Write OrderConfirmed outbox event (transactional outbox pattern)
+        try {
+            OrderEventPayload eventPayload = OrderEventPayload.builder()
+                    .orderId(order.getId())
+                    .orderNumber(order.getOrderNumber())
+                    .userId(order.getUser() != null ? order.getUser().getId() : null)
+                    .totalAmount(order.getTotalAmount())
+                    .eventType("OrderConfirmed")
+                    .status(order.getStatus().name())
+                    .timestamp(Instant.now())
+                    .build();
+
+            OutboxEvent outboxEvent = OutboxEvent.builder()
+                    .aggregateType("ORDER")
+                    .aggregateId(String.valueOf(order.getId()))
+                    .eventType("OrderConfirmed")
+                    .payload(objectMapper.writeValueAsString(eventPayload))
+                    .status(OutboxStatus.PENDING)
+                    .build();
+
+            outboxEventRepository.save(outboxEvent);
+            log.info("Saved OrderConfirmed outbox event for order {}", order.getOrderNumber());
+        } catch (Exception e) {
+            log.error("Failed to write OrderConfirmed outbox event for order {}: {}", order.getOrderNumber(), e.getMessage());
+            throw new RuntimeException("Could not write outbox event", e);
+        }
+
         // Mark active inventory reservations as CONSUMED and decrement reserved_qty
         List<InventoryReservation> activeReservations = inventoryReservationRepository
                 .findByOrderIdAndStatus(order.getId(), ReservationStatus.ACTIVE);
@@ -205,6 +238,33 @@ public class PaymentWebhookService {
         orderStateMachine.validateTransition(order.getStatus(), OrderStatus.FAILED);
         order.setStatus(OrderStatus.FAILED);
         orderRepository.save(order);
+
+        // Write OrderFailed outbox event (transactional outbox pattern)
+        try {
+            OrderEventPayload eventPayload = OrderEventPayload.builder()
+                    .orderId(order.getId())
+                    .orderNumber(order.getOrderNumber())
+                    .userId(order.getUser() != null ? order.getUser().getId() : null)
+                    .totalAmount(order.getTotalAmount())
+                    .eventType("OrderFailed")
+                    .status(order.getStatus().name())
+                    .timestamp(Instant.now())
+                    .build();
+
+            OutboxEvent outboxEvent = OutboxEvent.builder()
+                    .aggregateType("ORDER")
+                    .aggregateId(String.valueOf(order.getId()))
+                    .eventType("OrderFailed")
+                    .payload(objectMapper.writeValueAsString(eventPayload))
+                    .status(OutboxStatus.PENDING)
+                    .build();
+
+            outboxEventRepository.save(outboxEvent);
+            log.info("Saved OrderFailed outbox event for order {}", order.getOrderNumber());
+        } catch (Exception e) {
+            log.error("Failed to write OrderFailed outbox event for order {}: {}", order.getOrderNumber(), e.getMessage());
+            throw new RuntimeException("Could not write outbox event", e);
+        }
 
         // Mark payment transactions as FAILED
         List<PaymentTransaction> transactions = paymentTransactionRepository.findByOrderId(order.getId());

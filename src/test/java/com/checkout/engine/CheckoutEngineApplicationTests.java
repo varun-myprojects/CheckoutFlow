@@ -57,6 +57,12 @@ class CheckoutEngineApplicationTests {
     @MockBean
     private org.springframework.data.redis.core.RedisTemplate<String, Object> redisTemplate;
 
+    @MockBean
+    private com.checkout.engine.repository.OutboxEventRepository outboxEventRepository;
+
+    @MockBean
+    private org.springframework.kafka.core.KafkaTemplate<String, String> kafkaTemplate;
+
     @Test
     void contextLoads() {
     }

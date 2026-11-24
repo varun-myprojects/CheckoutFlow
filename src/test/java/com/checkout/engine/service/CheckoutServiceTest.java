@@ -87,6 +87,12 @@ class CheckoutServiceTest {
     @Spy
     private CheckoutTransactionRunner checkoutTransactionRunner = new CheckoutTransactionRunner();
 
+    @Mock
+    private com.checkout.engine.repository.OutboxEventRepository outboxEventRepository;
+
+    @Spy
+    private com.fasterxml.jackson.databind.ObjectMapper objectMapper = new com.fasterxml.jackson.databind.ObjectMapper().registerModule(new com.fasterxml.jackson.datatype.jsr310.JavaTimeModule());
+
     @InjectMocks
     private CheckoutService checkoutService;
 

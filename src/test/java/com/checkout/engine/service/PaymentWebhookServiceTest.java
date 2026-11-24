@@ -64,11 +64,14 @@ class PaymentWebhookServiceTest {
     @Mock
     private CacheService cacheService;
 
+    @Mock
+    private com.checkout.engine.repository.OutboxEventRepository outboxEventRepository;
+
     @Spy
     private OrderStateMachine orderStateMachine = new OrderStateMachine();
 
     @Spy
-    private ObjectMapper objectMapper = new ObjectMapper();
+    private ObjectMapper objectMapper = new ObjectMapper().registerModule(new com.fasterxml.jackson.datatype.jsr310.JavaTimeModule());
 
     @InjectMocks
     private PaymentWebhookService paymentWebhookService;

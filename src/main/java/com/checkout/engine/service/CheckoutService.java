@@ -27,6 +27,11 @@ import com.checkout.engine.repository.UserRepository;
 import com.checkout.engine.service.cache.CacheService;
 import com.checkout.engine.service.lock.InventoryLockStrategy;
 import com.checkout.engine.service.payment.PaymentGateway;
+import com.checkout.engine.dto.event.OrderEventPayload;
+import com.checkout.engine.entity.OutboxEvent;
+import com.checkout.engine.entity.OutboxStatus;
+import com.checkout.engine.repository.OutboxEventRepository;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.persistence.OptimisticLockException;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -34,6 +39,7 @@ import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -57,6 +63,8 @@ public class CheckoutService {
     private final OrderStateMachine orderStateMachine;
     private final CheckoutTransactionRunner checkoutTransactionRunner;
     private final CacheService cacheService;
+    private final OutboxEventRepository outboxEventRepository;
+    private final ObjectMapper objectMapper;
 
     public CheckoutResponse checkout(Long userId, String idempotencyKey) {
         // 0. Validate and normalize Idempotency-Key
@@ -222,6 +230,33 @@ public class CheckoutService {
         // Evict product stock cache for reserved products
         for (Long productId : lockedProductIds) {
             cacheService.evict("product:" + productId);
+        }
+
+        // Write OrderCreated outbox event (transactional outbox pattern)
+        try {
+            OrderEventPayload eventPayload = OrderEventPayload.builder()
+                    .orderId(savedOrder.getId())
+                    .orderNumber(savedOrder.getOrderNumber())
+                    .userId(user.getId())
+                    .totalAmount(savedOrder.getTotalAmount())
+                    .eventType("OrderCreated")
+                    .status(savedOrder.getStatus().name())
+                    .timestamp(Instant.now())
+                    .build();
+
+            OutboxEvent outboxEvent = OutboxEvent.builder()
+                    .aggregateType("ORDER")
+                    .aggregateId(String.valueOf(savedOrder.getId()))
+                    .eventType("OrderCreated")
+                    .payload(objectMapper.writeValueAsString(eventPayload))
+                    .status(OutboxStatus.PENDING)
+                    .build();
+
+            outboxEventRepository.save(outboxEvent);
+            log.info("Saved OrderCreated outbox event for order {}", savedOrder.getOrderNumber());
+        } catch (Exception e) {
+            log.error("Failed to write OrderCreated outbox event for order {}: {}", savedOrder.getOrderNumber(), e.getMessage());
+            throw new RuntimeException("Could not write outbox event", e);
         }
 
         log.info("Checkout successful. Order {} created for user {} with status {}, txnRef={}, paymentUrl={}",

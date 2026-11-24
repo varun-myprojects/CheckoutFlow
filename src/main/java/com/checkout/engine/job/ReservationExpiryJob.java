@@ -9,14 +9,20 @@ import com.checkout.engine.exception.ResourceNotFoundException;
 import com.checkout.engine.repository.InventoryRepository;
 import com.checkout.engine.repository.InventoryReservationRepository;
 import com.checkout.engine.repository.OrderRepository;
+import com.checkout.engine.dto.event.OrderEventPayload;
+import com.checkout.engine.entity.OutboxEvent;
+import com.checkout.engine.entity.OutboxStatus;
+import com.checkout.engine.repository.OutboxEventRepository;
 import com.checkout.engine.service.OrderStateMachine;
 import com.checkout.engine.service.cache.CacheService;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Instant;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -32,6 +38,8 @@ public class ReservationExpiryJob {
     private final InventoryRepository inventoryRepository;
     private final OrderStateMachine orderStateMachine;
     private final CacheService cacheService;
+    private final OutboxEventRepository outboxEventRepository;
+    private final ObjectMapper objectMapper;
 
     @Scheduled(fixedDelayString = "${checkout.reservation.expiry.fixed-delay-ms:30000}")
     @Transactional
@@ -77,6 +85,33 @@ public class ReservationExpiryJob {
                 order.setStatus(OrderStatus.EXPIRED);
                 orderRepository.save(order);
                 log.info("Transitioned order {} from PENDING_PAYMENT to EXPIRED due to reservation timeout", order.getOrderNumber());
+
+                // Write OrderExpired outbox event (transactional outbox pattern)
+                try {
+                    OrderEventPayload eventPayload = OrderEventPayload.builder()
+                            .orderId(order.getId())
+                            .orderNumber(order.getOrderNumber())
+                            .userId(order.getUser() != null ? order.getUser().getId() : null)
+                            .totalAmount(order.getTotalAmount())
+                            .eventType("OrderExpired")
+                            .status(order.getStatus().name())
+                            .timestamp(Instant.now())
+                            .build();
+
+                    OutboxEvent outboxEvent = OutboxEvent.builder()
+                            .aggregateType("ORDER")
+                            .aggregateId(String.valueOf(order.getId()))
+                            .eventType("OrderExpired")
+                            .payload(objectMapper.writeValueAsString(eventPayload))
+                            .status(OutboxStatus.PENDING)
+                            .build();
+
+                    outboxEventRepository.save(outboxEvent);
+                    log.info("Saved OrderExpired outbox event for order {}", order.getOrderNumber());
+                } catch (Exception e) {
+                    log.error("Failed to write OrderExpired outbox event for order {}: {}", order.getOrderNumber(), e.getMessage());
+                    throw new RuntimeException("Could not write outbox event", e);
+                }
             } else {
                 log.warn("Cannot transition order {} from {} to EXPIRED", order.getOrderNumber(), order.getStatus());
             }

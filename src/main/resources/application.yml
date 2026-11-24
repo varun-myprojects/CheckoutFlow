@@ -32,6 +32,14 @@ spring:
 
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      group-id: ${KAFKA_CONSUMER_GROUP_ID:checkout-engine-group}
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
 
 management:
   endpoints:
@@ -55,6 +63,14 @@ checkout:
       key-id: ${RAZORPAY_KEY_ID:rzp_test_sampleKeyId}
       key-secret: ${RAZORPAY_KEY_SECRET:rzp_test_sampleKeySecret}
       webhook-secret: ${RAZORPAY_WEBHOOK_SECRET:rzp_test_sampleWebhookSecret}
+  outbox:
+    relay:
+      fixed-delay-ms: ${OUTBOX_RELAY_FIXED_DELAY_MS:2000}
+    batch-size: ${OUTBOX_BATCH_SIZE:50}
+  kafka:
+    topics:
+      order-events: ${KAFKA_TOPIC_ORDER_EVENTS:order-events}
+      catalog-events: ${KAFKA_TOPIC_CATALOG_EVENTS:catalog-events}
 
 app:
   cache:

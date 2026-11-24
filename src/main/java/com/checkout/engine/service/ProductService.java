@@ -10,15 +10,24 @@ import com.checkout.engine.exception.ResourceNotFoundException;
 import com.checkout.engine.repository.InventoryRepository;
 import com.checkout.engine.repository.ProductRepository;
 import com.checkout.engine.service.cache.CacheService;
+import com.checkout.engine.dto.event.ProductPriceUpdatedEventPayload;
+import com.checkout.engine.entity.OutboxEvent;
+import com.checkout.engine.entity.OutboxStatus;
+import com.checkout.engine.repository.OutboxEventRepository;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.math.BigDecimal;
 import java.time.Duration;
+import java.time.Instant;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class ProductService {
@@ -26,9 +35,56 @@ public class ProductService {
     private final ProductRepository productRepository;
     private final InventoryRepository inventoryRepository;
     private final CacheService cacheService;
+    private final OutboxEventRepository outboxEventRepository;
+    private final ObjectMapper objectMapper;
 
     @Value("${app.cache.product-ttl-seconds:600}")
     private long productTtlSeconds;
+
+    @Transactional
+    public ProductDetailResponse updateProductPrice(Long productId, BigDecimal newPrice) {
+        Product product = productRepository.findById(productId)
+                .orElseThrow(() -> new ResourceNotFoundException("Product", "id", productId));
+
+        BigDecimal oldPrice = product.getPrice();
+        product.setPrice(newPrice);
+        Product savedProduct = productRepository.save(product);
+
+        Inventory inventory = inventoryRepository.findByProductId(productId).orElse(null);
+
+        // Strict cache eviction on price mutation
+        cacheService.evict("product:" + productId);
+
+        // Transactional Outbox Event: ProductPriceUpdated
+        try {
+            ProductPriceUpdatedEventPayload eventPayload = ProductPriceUpdatedEventPayload.builder()
+                    .productId(savedProduct.getId())
+                    .sku(savedProduct.getSku())
+                    .name(savedProduct.getName())
+                    .oldPrice(oldPrice)
+                    .newPrice(newPrice)
+                    .eventType("ProductPriceUpdated")
+                    .timestamp(Instant.now())
+                    .build();
+
+            OutboxEvent outboxEvent = OutboxEvent.builder()
+                    .aggregateType("PRODUCT")
+                    .aggregateId(String.valueOf(savedProduct.getId()))
+                    .eventType("ProductPriceUpdated")
+                    .payload(objectMapper.writeValueAsString(eventPayload))
+                    .status(OutboxStatus.PENDING)
+                    .build();
+
+            outboxEventRepository.save(outboxEvent);
+            log.info("Saved ProductPriceUpdated outbox event for product {} (SKU: {}): {} -> {}",
+                    savedProduct.getId(), savedProduct.getSku(), oldPrice, newPrice);
+        } catch (Exception e) {
+            log.error("Failed to write ProductPriceUpdated outbox event for product {}: {}", productId, e.getMessage());
+            throw new RuntimeException("Could not write outbox event", e);
+        }
+
+        return mapToProductDetailResponse(savedProduct, inventory);
+    }
 
     @Transactional
     public ProductDetailResponse createProduct(CreateProductRequest request) {

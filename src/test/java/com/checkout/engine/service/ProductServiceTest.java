@@ -3,17 +3,23 @@ package com.checkout.engine.service;
 import com.checkout.engine.dto.CreateProductRequest;
 import com.checkout.engine.dto.ProductDetailResponse;
 import com.checkout.engine.entity.Inventory;
+import com.checkout.engine.entity.OutboxEvent;
+import com.checkout.engine.entity.OutboxStatus;
 import com.checkout.engine.entity.Product;
 import com.checkout.engine.exception.DuplicateRequestException;
 import com.checkout.engine.exception.ResourceNotFoundException;
 import com.checkout.engine.repository.InventoryRepository;
+import com.checkout.engine.repository.OutboxEventRepository;
 import com.checkout.engine.repository.ProductRepository;
 import com.checkout.engine.service.cache.CacheService;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
+import org.mockito.Spy;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.test.util.ReflectionTestUtils;
 
@@ -40,6 +46,12 @@ class ProductServiceTest {
 
     @Mock
     private CacheService cacheService;
+
+    @Mock
+    private OutboxEventRepository outboxEventRepository;
+
+    @Spy
+    private ObjectMapper objectMapper = new ObjectMapper().registerModule(new com.fasterxml.jackson.datatype.jsr310.JavaTimeModule());
 
     @InjectMocks
     private ProductService productService;
@@ -163,5 +175,44 @@ class ProductServiceTest {
 
         verify(productRepository, never()).save(any());
         verify(cacheService, never()).evict(any());
+    }
+
+    @Test
+    void updateProductPrice_success_updatesPriceEvictsCacheAndWritesOutboxEvent() {
+        when(productRepository.findById(1L)).thenReturn(Optional.of(sampleProduct));
+        when(productRepository.save(any(Product.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        when(inventoryRepository.findByProductId(1L)).thenReturn(Optional.of(sampleInventory));
+
+        BigDecimal newPrice = BigDecimal.valueOf(1799.99);
+        ProductDetailResponse response = productService.updateProductPrice(1L, newPrice);
+
+        assertThat(response).isNotNull();
+        assertThat(response.getPrice()).isEqualByComparingTo(newPrice);
+        assertThat(sampleProduct.getPrice()).isEqualByComparingTo(newPrice);
+
+        verify(cacheService).evict("product:1");
+
+        ArgumentCaptor<OutboxEvent> outboxCaptor = ArgumentCaptor.forClass(OutboxEvent.class);
+        verify(outboxEventRepository).save(outboxCaptor.capture());
+
+        OutboxEvent capturedEvent = outboxCaptor.getValue();
+        assertThat(capturedEvent.getAggregateType()).isEqualTo("PRODUCT");
+        assertThat(capturedEvent.getAggregateId()).isEqualTo("1");
+        assertThat(capturedEvent.getEventType()).isEqualTo("ProductPriceUpdated");
+        assertThat(capturedEvent.getStatus()).isEqualTo(OutboxStatus.PENDING);
+        assertThat(capturedEvent.getPayload()).contains("1799.99");
+        assertThat(capturedEvent.getPayload()).contains("1999.99");
+    }
+
+    @Test
+    void updateProductPrice_productNotFound_throwsResourceNotFoundException() {
+        when(productRepository.findById(999L)).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> productService.updateProductPrice(999L, BigDecimal.valueOf(99.99)))
+                .isInstanceOf(ResourceNotFoundException.class)
+                .hasMessageContaining("Product not found with id: '999'");
+
+        verify(cacheService, never()).evict(any());
+        verify(outboxEventRepository, never()).save(any());
     }
 }
