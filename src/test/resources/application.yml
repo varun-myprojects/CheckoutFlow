@@ -1,4 +1,7 @@
 spring:
+  config:
+    activate:
+      on-profile: "!integration"
   autoconfigure:
     exclude:
       - org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration

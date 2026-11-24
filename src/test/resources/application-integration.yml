@@ -1,0 +1,44 @@
+spring:
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.kafka.KafkaAutoConfiguration
+  datasource:
+    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/${DB_NAME:checkout_db}?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD:root}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+    open-in-view: false
+  flyway:
+    enabled: true
+    baseline-on-migrate: true
+    locations: classpath:db/migration
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+    jpa:
+      repositories:
+        enabled: true
+  kafka:
+    listener:
+      auto-startup: false
+
+checkout:
+  lock:
+    strategy: pessimistic
+  payment:
+    gateway: mock
+    mock:
+      base-url: http://localhost:8080
+      webhook-secret: mock_webhook_secret_key
+  outbox:
+    relay:
+      fixed-delay-ms: 99999999
+
+app:
+  cache:
+    enabled: true
