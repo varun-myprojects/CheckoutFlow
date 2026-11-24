@@ -222,4 +222,31 @@ class PaymentWebhookServiceTest {
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("Missing provider_event_id");
     }
+
+    @Test
+    void processWebhook_latePaymentForExpiredOrder_initiatesRefundWithoutModifyingInventory() {
+        sampleOrder.setStatus(OrderStatus.EXPIRED);
+        when(paymentGateway.verifyWebhookSignature(anyString(), anyString())).thenReturn(true);
+        when(processedWebhookEventRepository.existsByProviderEventId("evt_late_123")).thenReturn(false);
+        when(orderRepository.findByIdWithPessimisticLock(1L)).thenReturn(Optional.of(sampleOrder));
+        when(paymentTransactionRepository.findByOrderId(1L)).thenReturn(List.of(sampleTransaction));
+
+        String payload = "{\"providerEventId\":\"evt_late_123\",\"orderId\":1,\"event\":\"payment.captured\",\"status\":\"SUCCESS\"}";
+
+        PaymentWebhookResult result = paymentWebhookService.processWebhook(payload, "valid_sig");
+
+        assertThat(result.isAlreadyProcessed()).isFalse();
+        assertThat(result.getOrderStatus()).isEqualTo(OrderStatus.EXPIRED);
+        assertThat(result.getPaymentStatus()).isEqualTo(PaymentStatus.LATE_PAYMENT_REFUND_PENDING);
+
+        // Order remains EXPIRED, no inventory mutations
+        assertThat(sampleOrder.getStatus()).isEqualTo(OrderStatus.EXPIRED);
+        assertThat(sampleTransaction.getStatus()).isEqualTo(PaymentStatus.LATE_PAYMENT_REFUND_PENDING);
+
+        verify(orderRepository, never()).save(sampleOrder);
+        verify(inventoryRepository, never()).save(any());
+        verify(inventoryReservationRepository, never()).save(any());
+        verify(paymentGateway).initiateRefund(any());
+        verify(processedWebhookEventRepository).saveAndFlush(any(ProcessedWebhookEvent.class));
+    }
 }

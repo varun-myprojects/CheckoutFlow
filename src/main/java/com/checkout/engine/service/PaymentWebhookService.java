@@ -2,6 +2,8 @@ package com.checkout.engine.service;
 
 import com.checkout.engine.dto.PaymentWebhookPayload;
 import com.checkout.engine.dto.PaymentWebhookResult;
+import com.checkout.engine.dto.RefundRequest;
+import com.checkout.engine.dto.RefundResult;
 import com.checkout.engine.entity.Inventory;
 import com.checkout.engine.entity.InventoryReservation;
 import com.checkout.engine.entity.Order;
@@ -134,6 +136,13 @@ public class PaymentWebhookService {
 
     private void handlePaymentSuccess(Order order) {
         log.info("Handling PAYMENT_SUCCESS for order {}", order.getOrderNumber());
+
+        if (order.getStatus() == OrderStatus.EXPIRED) {
+            log.warn("Late payment race condition: order {} is already EXPIRED. Initiating refund without confirming order or overselling inventory.",
+                    order.getOrderNumber());
+            handleLatePaymentRefund(order);
+            return;
+        }
 
         if (order.getStatus() == OrderStatus.CONFIRMED) {
             log.info("Order {} is already CONFIRMED. Skipping transition.", order.getOrderNumber());
@@ -271,5 +280,29 @@ public class PaymentWebhookService {
             return null;
         }
         return txns.get(txns.size() - 1).getStatus();
+    }
+
+    private void handleLatePaymentRefund(Order order) {
+        List<PaymentTransaction> transactions = paymentTransactionRepository.findByOrderId(order.getId());
+        for (PaymentTransaction txn : transactions) {
+            txn.setStatus(PaymentStatus.LATE_PAYMENT_REFUND_PENDING);
+            paymentTransactionRepository.save(txn);
+
+            RefundRequest refundRequest = RefundRequest.builder()
+                    .transactionReference(txn.getTransactionReference())
+                    .amount(txn.getAmount())
+                    .currency(txn.getCurrency())
+                    .reason("Late payment received after order expiration")
+                    .build();
+
+            try {
+                RefundResult refundResult = paymentGateway.initiateRefund(refundRequest);
+                log.info("Initiated refund for late payment on order {}: txnRef={}, refundRef={}, status={}",
+                        order.getOrderNumber(), txn.getTransactionReference(), refundResult.getRefundReference(), refundResult.getStatus());
+            } catch (Exception e) {
+                log.error("Failed to initiate refund for late payment on order {} (txnRef={}): {}",
+                        order.getOrderNumber(), txn.getTransactionReference(), e.getMessage(), e);
+            }
+        }
     }
 }
