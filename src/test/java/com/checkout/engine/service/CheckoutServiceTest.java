@@ -1,12 +1,15 @@
 package com.checkout.engine.service;
 
 import com.checkout.engine.dto.CheckoutResponse;
+import com.checkout.engine.dto.PaymentInitiationResult;
 import com.checkout.engine.entity.Cart;
 import com.checkout.engine.entity.CartItem;
 import com.checkout.engine.entity.CartStatus;
 import com.checkout.engine.entity.Order;
 import com.checkout.engine.entity.OrderItem;
 import com.checkout.engine.entity.OrderStatus;
+import com.checkout.engine.entity.PaymentStatus;
+import com.checkout.engine.entity.PaymentTransaction;
 import com.checkout.engine.entity.Product;
 import com.checkout.engine.entity.User;
 import com.checkout.engine.exception.DuplicateRequestException;
@@ -17,8 +20,10 @@ import com.checkout.engine.repository.CartItemRepository;
 import com.checkout.engine.repository.CartRepository;
 import com.checkout.engine.repository.OrderItemRepository;
 import com.checkout.engine.repository.OrderRepository;
+import com.checkout.engine.repository.PaymentTransactionRepository;
 import com.checkout.engine.repository.UserRepository;
 import com.checkout.engine.service.lock.InventoryLockStrategy;
+import com.checkout.engine.service.payment.PaymentGateway;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -64,7 +69,13 @@ class CheckoutServiceTest {
     private OrderItemRepository orderItemRepository;
 
     @Mock
+    private PaymentTransactionRepository paymentTransactionRepository;
+
+    @Mock
     private InventoryLockStrategy inventoryLockStrategy;
+
+    @Mock
+    private PaymentGateway paymentGateway;
 
     @Spy
     private OrderStateMachine orderStateMachine = new OrderStateMachine();
@@ -87,6 +98,22 @@ class CheckoutServiceTest {
                     java.util.function.Supplier<?> action = invocation.getArgument(1);
                     return action.get();
                 });
+
+        lenient().when(paymentGateway.initiatePayment(any()))
+                .thenReturn(PaymentInitiationResult.builder()
+                        .transactionReference("mock_txn_test123")
+                        .paymentUrl("http://localhost:8080/api/v1/mock-gateway/pay/mock_txn_test123")
+                        .status(PaymentStatus.INITIATED)
+                        .gatewayName("MOCK")
+                        .build());
+
+        lenient().when(paymentGateway.getGatewayName()).thenReturn("MOCK");
+
+        lenient().when(paymentGateway.buildPaymentUrl(any()))
+                .thenAnswer(inv -> "http://localhost:8080/api/v1/mock-gateway/pay/" + inv.getArgument(0));
+
+        lenient().when(paymentTransactionRepository.save(any(PaymentTransaction.class)))
+                .thenAnswer(inv -> inv.getArgument(0));
 
         sampleUser = User.builder()
                 .id(1L)
@@ -151,6 +178,7 @@ class CheckoutServiceTest {
         assertThat(response.getOrderId()).isEqualTo(999L);
         assertThat(response.getStatus()).isEqualTo(OrderStatus.PENDING_PAYMENT);
         assertThat(response.getTotalAmount()).isEqualByComparingTo("4000.00");
+        assertThat(response.getPaymentUrl()).isEqualTo("http://localhost:8080/api/v1/mock-gateway/pay/mock_txn_test123");
         assertThat(response.getItems()).hasSize(1);
         assertThat(response.getItems().get(0).getPrice()).isEqualByComparingTo("2000.00");
         assertThat(response.getItems().get(0).getLineTotal()).isEqualByComparingTo("4000.00");
@@ -159,6 +187,15 @@ class CheckoutServiceTest {
         assertThat(sampleCart.getStatus()).isEqualTo(CartStatus.ORDERED);
         verify(cartRepository).save(sampleCart);
         verify(inventoryLockStrategy).reserveInventory(any(Order.class), any());
+
+        // Verify PaymentTransaction created in INITIATED status
+        ArgumentCaptor<PaymentTransaction> txnCaptor = ArgumentCaptor.forClass(PaymentTransaction.class);
+        verify(paymentTransactionRepository).save(txnCaptor.capture());
+        PaymentTransaction savedTxn = txnCaptor.getValue();
+        assertThat(savedTxn.getStatus()).isEqualTo(PaymentStatus.INITIATED);
+        assertThat(savedTxn.getTransactionReference()).isEqualTo("mock_txn_test123");
+        assertThat(savedTxn.getAmount()).isEqualByComparingTo("4000.00");
+        assertThat(savedTxn.getPaymentMethod()).isEqualTo("MOCK");
     }
 
     @Test
@@ -212,6 +249,7 @@ class CheckoutServiceTest {
 
         verify(orderRepository, never()).save(any());
         verify(inventoryLockStrategy, never()).reserveInventory(any(), any());
+        verify(paymentTransactionRepository, never()).save(any());
     }
 
     @Test
@@ -251,14 +289,24 @@ class CheckoutServiceTest {
                 .price(BigDecimal.valueOf(2000.00))
                 .build();
 
+        PaymentTransaction txn = PaymentTransaction.builder()
+                .id(10L)
+                .order(existingOrder)
+                .transactionReference("mock_txn_existing")
+                .amount(BigDecimal.valueOf(2000.00))
+                .status(PaymentStatus.INITIATED)
+                .build();
+
         when(orderRepository.findByIdempotencyKey("KEY-REPLAY")).thenReturn(Optional.of(existingOrder));
         when(orderItemRepository.findByOrderId(777L)).thenReturn(List.of(item));
+        when(paymentTransactionRepository.findByOrderId(777L)).thenReturn(List.of(txn));
 
         CheckoutResponse response = checkoutService.checkout(1L, "KEY-REPLAY");
 
         assertThat(response).isNotNull();
         assertThat(response.getOrderId()).isEqualTo(777L);
         assertThat(response.getOrderNumber()).isEqualTo("ORD-IDEMP-EXISTING");
+        assertThat(response.getPaymentUrl()).isEqualTo("http://localhost:8080/api/v1/mock-gateway/pay/mock_txn_existing");
         verify(orderRepository, never()).save(any());
         verify(inventoryLockStrategy, never()).reserveInventory(any(), any());
     }
@@ -302,6 +350,8 @@ class CheckoutServiceTest {
         assertThatThrownBy(() -> checkoutService.checkout(1L, "KEY-STOCK"))
                 .isInstanceOf(InsufficientStockException.class)
                 .hasMessageContaining("Requested: 2, Available: 1");
+
+        verify(paymentTransactionRepository, never()).save(any());
     }
 
     @Test
@@ -342,6 +392,7 @@ class CheckoutServiceTest {
 
         assertThat(response).isNotNull();
         assertThat(response.getOrderId()).isEqualTo(999L);
+        assertThat(response.getPaymentUrl()).isEqualTo("http://localhost:8080/api/v1/mock-gateway/pay/mock_txn_test123");
         // Verify reserveInventory was retried (called twice)
         verify(inventoryLockStrategy, times(2)).reserveInventory(any(Order.class), any());
     }
@@ -405,5 +456,6 @@ class CheckoutServiceTest {
 
         verify(orderRepository, never()).save(any());
         verify(inventoryLockStrategy, never()).reserveInventory(any(), any());
+        verify(paymentTransactionRepository, never()).save(any());
     }
 }

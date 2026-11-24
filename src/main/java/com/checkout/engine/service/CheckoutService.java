@@ -2,12 +2,16 @@ package com.checkout.engine.service;
 
 import com.checkout.engine.dto.CheckoutResponse;
 import com.checkout.engine.dto.OrderItemResponse;
+import com.checkout.engine.dto.PaymentInitiationRequest;
+import com.checkout.engine.dto.PaymentInitiationResult;
 import com.checkout.engine.entity.Cart;
 import com.checkout.engine.entity.CartItem;
 import com.checkout.engine.entity.CartStatus;
 import com.checkout.engine.entity.Order;
 import com.checkout.engine.entity.OrderItem;
 import com.checkout.engine.entity.OrderStatus;
+import com.checkout.engine.entity.PaymentStatus;
+import com.checkout.engine.entity.PaymentTransaction;
 import com.checkout.engine.entity.Product;
 import com.checkout.engine.entity.User;
 import com.checkout.engine.exception.DuplicateRequestException;
@@ -18,8 +22,10 @@ import com.checkout.engine.repository.CartItemRepository;
 import com.checkout.engine.repository.CartRepository;
 import com.checkout.engine.repository.OrderItemRepository;
 import com.checkout.engine.repository.OrderRepository;
+import com.checkout.engine.repository.PaymentTransactionRepository;
 import com.checkout.engine.repository.UserRepository;
 import com.checkout.engine.service.lock.InventoryLockStrategy;
+import com.checkout.engine.service.payment.PaymentGateway;
 import jakarta.persistence.OptimisticLockException;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -44,7 +50,9 @@ public class CheckoutService {
     private final CartItemRepository cartItemRepository;
     private final OrderRepository orderRepository;
     private final OrderItemRepository orderItemRepository;
+    private final PaymentTransactionRepository paymentTransactionRepository;
     private final InventoryLockStrategy inventoryLockStrategy;
+    private final PaymentGateway paymentGateway;
     private final OrderStateMachine orderStateMachine;
     private final CheckoutTransactionRunner checkoutTransactionRunner;
 
@@ -63,7 +71,7 @@ public class CheckoutService {
                 throw new DuplicateRequestException("Idempotency key already used by another user.");
             }
             log.info("Replaying existing order {} for idempotency key {}", existingOrder.getOrderNumber(), normalizedIdempotencyKey);
-            return mapToCheckoutResponse(existingOrder);
+            return checkoutTransactionRunner.runInTransaction(() -> mapToCheckoutResponse(existingOrder));
         }
 
         // 2. Fetch sorted productIds of user's active cart (read-only pre-lookup)
@@ -180,18 +188,49 @@ public class CheckoutService {
         cart.setStatus(CartStatus.ORDERED);
         cartRepository.save(cart);
 
-        log.info("Checkout successful. Order {} created for user {} with status {}",
-                savedOrder.getOrderNumber(), userId, savedOrder.getStatus());
+        // Initiate payment through PaymentGateway strategy
+        PaymentInitiationRequest paymentRequest = PaymentInitiationRequest.builder()
+                .orderId(savedOrder.getId())
+                .orderNumber(savedOrder.getOrderNumber())
+                .amount(savedOrder.getTotalAmount())
+                .currency("USD")
+                .idempotencyKey("pay-" + normalizedIdempotencyKey)
+                .customerEmail(user.getEmail())
+                .customerName(user.getName())
+                .build();
 
-        return mapToCheckoutResponse(savedOrder, savedOrderItems);
+        PaymentInitiationResult paymentResult = paymentGateway.initiatePayment(paymentRequest);
+
+        // Create and persist payment_transactions record (INITIATED)
+        PaymentTransaction paymentTransaction = PaymentTransaction.builder()
+                .order(savedOrder)
+                .transactionReference(paymentResult.getTransactionReference())
+                .idempotencyKey("pay-" + normalizedIdempotencyKey)
+                .amount(savedOrder.getTotalAmount())
+                .currency("USD")
+                .status(PaymentStatus.INITIATED)
+                .paymentMethod(paymentGateway.getGatewayName())
+                .build();
+
+        paymentTransactionRepository.save(paymentTransaction);
+
+        log.info("Checkout successful. Order {} created for user {} with status {}, txnRef={}, paymentUrl={}",
+                savedOrder.getOrderNumber(), userId, savedOrder.getStatus(),
+                paymentResult.getTransactionReference(), paymentResult.getPaymentUrl());
+
+        return mapToCheckoutResponse(savedOrder, savedOrderItems, paymentResult.getPaymentUrl());
     }
 
     private CheckoutResponse mapToCheckoutResponse(Order order) {
         List<OrderItem> items = orderItemRepository.findByOrderId(order.getId());
-        return mapToCheckoutResponse(order, items);
+        String paymentUrl = paymentTransactionRepository.findByOrderId(order.getId()).stream()
+                .findFirst()
+                .map(txn -> paymentGateway.buildPaymentUrl(txn.getTransactionReference()))
+                .orElse(null);
+        return mapToCheckoutResponse(order, items, paymentUrl);
     }
 
-    private CheckoutResponse mapToCheckoutResponse(Order order, List<OrderItem> items) {
+    private CheckoutResponse mapToCheckoutResponse(Order order, List<OrderItem> items, String paymentUrl) {
         List<OrderItemResponse> itemResponses = new ArrayList<>();
         for (OrderItem item : items) {
             Product product = item.getProduct();
@@ -214,6 +253,7 @@ public class CheckoutService {
                 .status(order.getStatus())
                 .totalAmount(order.getTotalAmount())
                 .idempotencyKey(order.getIdempotencyKey())
+                .paymentUrl(paymentUrl)
                 .items(itemResponses)
                 .createdAt(order.getCreatedAt())
                 .build();

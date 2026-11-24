@@ -24,6 +24,7 @@ public class CheckoutResponse {
     private OrderStatus status;
     private BigDecimal totalAmount;
     private String idempotencyKey;
+    private String paymentUrl;
     private List<OrderItemResponse> items;
     private Instant createdAt;
 }

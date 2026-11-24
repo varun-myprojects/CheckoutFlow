@@ -46,4 +46,13 @@ management:
 checkout:
   lock:
     strategy: ${CHECKOUT_LOCK_STRATEGY:pessimistic}
+  payment:
+    gateway: ${CHECKOUT_PAYMENT_GATEWAY:mock}
+    mock:
+      base-url: ${MOCK_GATEWAY_BASE_URL:http://localhost:8080}
+      webhook-secret: ${MOCK_GATEWAY_WEBHOOK_SECRET:mock_webhook_secret_key}
+    razorpay:
+      key-id: ${RAZORPAY_KEY_ID:rzp_test_sampleKeyId}
+      key-secret: ${RAZORPAY_KEY_SECRET:rzp_test_sampleKeySecret}
+      webhook-secret: ${RAZORPAY_WEBHOOK_SECRET:rzp_test_sampleWebhookSecret}
 
