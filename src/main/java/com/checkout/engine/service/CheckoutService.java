@@ -46,17 +46,20 @@ public class CheckoutService {
 
     @Transactional
     public CheckoutResponse checkout(Long userId, String idempotencyKey) {
+        // 0. Validate Idempotency-Key
+        if (idempotencyKey == null || idempotencyKey.isBlank()) {
+            throw new IllegalArgumentException("Idempotency-Key header must not be blank");
+        }
+
         // 1. Idempotency Check
-        if (idempotencyKey != null && !idempotencyKey.isBlank()) {
-            var existingOrderOpt = orderRepository.findByIdempotencyKey(idempotencyKey);
-            if (existingOrderOpt.isPresent()) {
-                Order existingOrder = existingOrderOpt.get();
-                if (!existingOrder.getUser().getId().equals(userId)) {
-                    throw new DuplicateRequestException("Idempotency key already used by another user.");
-                }
-                log.info("Replaying existing order {} for idempotency key {}", existingOrder.getOrderNumber(), idempotencyKey);
-                return mapToCheckoutResponse(existingOrder);
+        var existingOrderOpt = orderRepository.findByIdempotencyKey(idempotencyKey.trim());
+        if (existingOrderOpt.isPresent()) {
+            Order existingOrder = existingOrderOpt.get();
+            if (!existingOrder.getUser().getId().equals(userId)) {
+                throw new DuplicateRequestException("Idempotency key already used by another user.");
             }
+            log.info("Replaying existing order {} for idempotency key {}", existingOrder.getOrderNumber(), idempotencyKey);
+            return mapToCheckoutResponse(existingOrder);
         }
 
         // 2. User & Cart Validation

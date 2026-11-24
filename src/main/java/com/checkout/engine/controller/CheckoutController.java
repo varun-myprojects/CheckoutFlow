@@ -22,7 +22,7 @@ public class CheckoutController {
     @PostMapping("/{userId}")
     public ResponseEntity<ApiResponse<CheckoutResponse>> checkout(
             @PathVariable Long userId,
-            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey
+            @RequestHeader(value = "Idempotency-Key", required = true) String idempotencyKey
     ) {
         CheckoutResponse response = checkoutService.checkout(userId, idempotencyKey);
         return ResponseEntity

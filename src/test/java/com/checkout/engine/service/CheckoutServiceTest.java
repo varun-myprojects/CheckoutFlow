@@ -163,11 +163,28 @@ class CheckoutServiceTest {
         when(cartRepository.findByUserIdAndStatus(1L, CartStatus.ACTIVE)).thenReturn(Optional.of(sampleCart));
         when(cartItemRepository.findByCartId(50L)).thenReturn(Collections.emptyList());
 
-        assertThatThrownBy(() -> checkoutService.checkout(1L, null))
+        assertThatThrownBy(() -> checkoutService.checkout(1L, "KEY-EMPTY"))
                 .isInstanceOf(InvalidStateTransitionException.class)
                 .hasMessageContaining("Cannot checkout: Active cart is empty");
 
         verify(orderRepository, never()).save(any());
+    }
+
+    @Test
+    void checkout_blankIdempotencyKey_throwsIllegalArgumentException() {
+        assertThatThrownBy(() -> checkoutService.checkout(1L, ""))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Idempotency-Key header must not be blank");
+
+        assertThatThrownBy(() -> checkoutService.checkout(1L, "   "))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Idempotency-Key header must not be blank");
+
+        assertThatThrownBy(() -> checkoutService.checkout(1L, null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Idempotency-Key header must not be blank");
+
+        verify(orderRepository, never()).findByIdempotencyKey(any());
     }
 
     @Test
