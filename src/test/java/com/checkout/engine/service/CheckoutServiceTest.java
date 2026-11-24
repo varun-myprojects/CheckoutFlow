@@ -22,6 +22,7 @@ import com.checkout.engine.repository.OrderItemRepository;
 import com.checkout.engine.repository.OrderRepository;
 import com.checkout.engine.repository.PaymentTransactionRepository;
 import com.checkout.engine.repository.UserRepository;
+import com.checkout.engine.service.cache.CacheService;
 import com.checkout.engine.service.lock.InventoryLockStrategy;
 import com.checkout.engine.service.payment.PaymentGateway;
 import org.junit.jupiter.api.BeforeEach;
@@ -76,6 +77,9 @@ class CheckoutServiceTest {
 
     @Mock
     private PaymentGateway paymentGateway;
+
+    @Mock
+    private CacheService cacheService;
 
     @Spy
     private OrderStateMachine orderStateMachine = new OrderStateMachine();

@@ -51,6 +51,12 @@ class CheckoutEngineApplicationTests {
     @MockBean
     private ProcessedWebhookEventRepository processedWebhookEventRepository;
 
+    @MockBean
+    private org.springframework.data.redis.connection.RedisConnectionFactory redisConnectionFactory;
+
+    @MockBean
+    private org.springframework.data.redis.core.RedisTemplate<String, Object> redisTemplate;
+
     @Test
     void contextLoads() {
     }

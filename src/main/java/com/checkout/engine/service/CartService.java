@@ -17,13 +17,19 @@ import com.checkout.engine.repository.CartRepository;
 import com.checkout.engine.repository.InventoryRepository;
 import com.checkout.engine.repository.ProductRepository;
 import com.checkout.engine.repository.UserRepository;
+import com.checkout.engine.service.cache.CacheService;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
@@ -34,12 +40,22 @@ public class CartService {
     private final UserRepository userRepository;
     private final ProductRepository productRepository;
     private final InventoryRepository inventoryRepository;
+    private final CacheService cacheService;
+
+    @Value("${app.cache.cart-ttl-seconds:300}")
+    private long cartTtlSeconds;
 
     @Transactional
     public CartResponse getCart(Long userId) {
-        User user = findUserById(userId);
-        Cart cart = getOrCreateActiveCart(user);
-        return buildCartResponse(cart);
+        String cacheKey = "cart:" + userId;
+        return cacheService.get(cacheKey, CartResponse.class)
+                .orElseGet(() -> {
+                    User user = findUserById(userId);
+                    Cart cart = getOrCreateActiveCart(user);
+                    CartResponse response = buildCartResponse(cart);
+                    cacheService.put(cacheKey, response, Duration.ofSeconds(cartTtlSeconds));
+                    return response;
+                });
     }
 
     @Transactional
@@ -74,7 +90,9 @@ public class CartService {
             cartItemRepository.save(newItem);
         }
 
-        return buildCartResponse(cart);
+        CartResponse response = buildCartResponse(cart);
+        cacheService.evict("cart:" + userId);
+        return response;
     }
 
     @Transactional
@@ -95,7 +113,9 @@ public class CartService {
         cartItem.setQuantity(request.getQuantity());
         cartItemRepository.save(cartItem);
 
-        return buildCartResponse(cart);
+        CartResponse response = buildCartResponse(cart);
+        cacheService.evict("cart:" + userId);
+        return response;
     }
 
     @Transactional
@@ -108,7 +128,9 @@ public class CartService {
 
         cartItemRepository.delete(cartItem);
 
-        return buildCartResponse(cart);
+        CartResponse response = buildCartResponse(cart);
+        cacheService.evict("cart:" + userId);
+        return response;
     }
 
     private User findUserById(Long userId) {
@@ -137,6 +159,15 @@ public class CartService {
         BigDecimal subtotal = BigDecimal.ZERO;
         int totalItems = 0;
 
+        List<Long> productIds = items.stream()
+                .map(item -> item.getProduct().getId())
+                .distinct()
+                .toList();
+
+        Map<Long, Inventory> inventoryMap = productIds.isEmpty() ? Collections.emptyMap() :
+                inventoryRepository.findByProductIdIn(productIds).stream()
+                        .collect(Collectors.toMap(inv -> inv.getProduct().getId(), inv -> inv, (a, b) -> a));
+
         for (CartItem item : items) {
             Product product = item.getProduct();
             BigDecimal unitPrice = product.getPrice();
@@ -144,7 +175,7 @@ public class CartService {
             subtotal = subtotal.add(lineTotal);
             totalItems += item.getQuantity();
 
-            Inventory inventory = inventoryRepository.findByProductId(product.getId()).orElse(null);
+            Inventory inventory = inventoryMap.get(product.getId());
             Integer availableStock = inventory != null ? inventory.getAvailableQty() : 0;
 
             itemResponses.add(CartItemResponse.builder()

@@ -10,6 +10,7 @@ import com.checkout.engine.repository.InventoryRepository;
 import com.checkout.engine.repository.InventoryReservationRepository;
 import com.checkout.engine.repository.OrderRepository;
 import com.checkout.engine.service.OrderStateMachine;
+import com.checkout.engine.service.cache.CacheService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -43,6 +44,9 @@ class ReservationExpiryJobTest {
 
     @Mock
     private InventoryRepository inventoryRepository;
+
+    @Mock
+    private CacheService cacheService;
 
     @Spy
     private OrderStateMachine orderStateMachine = new OrderStateMachine();

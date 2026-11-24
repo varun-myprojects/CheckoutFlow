@@ -19,6 +19,7 @@ import com.checkout.engine.repository.InventoryReservationRepository;
 import com.checkout.engine.repository.OrderRepository;
 import com.checkout.engine.repository.PaymentTransactionRepository;
 import com.checkout.engine.repository.ProcessedWebhookEventRepository;
+import com.checkout.engine.service.cache.CacheService;
 import com.checkout.engine.service.payment.PaymentGateway;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
@@ -43,6 +44,7 @@ public class PaymentWebhookService {
     private final InventoryRepository inventoryRepository;
     private final OrderStateMachine orderStateMachine;
     private final ObjectMapper objectMapper;
+    private final CacheService cacheService;
 
     /**
      * Processes an incoming payment webhook callback:
@@ -184,6 +186,8 @@ public class PaymentWebhookService {
                     inventory.setReservedQty(newReserved);
                     inventoryRepository.save(inventory);
 
+                    cacheService.evict("product:" + productId);
+
                     log.info("Consumed reservation {} for order {}: product={}, reservedQty decremented by {} to {}",
                             res.getId(), order.getOrderNumber(), productId, res.getQuantity(), newReserved);
                 });
@@ -231,6 +235,8 @@ public class PaymentWebhookService {
                     inventory.setAvailableQty(newAvailable);
                     inventory.setReservedQty(newReserved);
                     inventoryRepository.save(inventory);
+
+                    cacheService.evict("product:" + productId);
 
                     log.info("Released reservation {} for order {}: product={}, availableQty restored to {}, reservedQty to {}",
                             res.getId(), order.getOrderNumber(), productId, newAvailable, newReserved);

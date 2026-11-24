@@ -17,6 +17,7 @@ import com.checkout.engine.repository.OrderRepository;
 import com.checkout.engine.repository.PaymentTransactionRepository;
 import com.checkout.engine.repository.ProcessedWebhookEventRepository;
 import com.checkout.engine.service.payment.PaymentGateway;
+import com.checkout.engine.service.cache.CacheService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -59,6 +60,9 @@ class PaymentWebhookServiceTest {
 
     @Mock
     private InventoryRepository inventoryRepository;
+
+    @Mock
+    private CacheService cacheService;
 
     @Spy
     private OrderStateMachine orderStateMachine = new OrderStateMachine();

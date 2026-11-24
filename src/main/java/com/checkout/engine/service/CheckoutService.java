@@ -24,6 +24,7 @@ import com.checkout.engine.repository.OrderItemRepository;
 import com.checkout.engine.repository.OrderRepository;
 import com.checkout.engine.repository.PaymentTransactionRepository;
 import com.checkout.engine.repository.UserRepository;
+import com.checkout.engine.service.cache.CacheService;
 import com.checkout.engine.service.lock.InventoryLockStrategy;
 import com.checkout.engine.service.payment.PaymentGateway;
 import jakarta.persistence.OptimisticLockException;
@@ -55,6 +56,7 @@ public class CheckoutService {
     private final PaymentGateway paymentGateway;
     private final OrderStateMachine orderStateMachine;
     private final CheckoutTransactionRunner checkoutTransactionRunner;
+    private final CacheService cacheService;
 
     public CheckoutResponse checkout(Long userId, String idempotencyKey) {
         // 0. Validate and normalize Idempotency-Key
@@ -213,6 +215,14 @@ public class CheckoutService {
                 .build();
 
         paymentTransactionRepository.save(paymentTransaction);
+
+        // Evict user cart cache
+        cacheService.evict("cart:" + userId);
+
+        // Evict product stock cache for reserved products
+        for (Long productId : lockedProductIds) {
+            cacheService.evict("product:" + productId);
+        }
 
         log.info("Checkout successful. Order {} created for user {} with status {}, txnRef={}, paymentUrl={}",
                 savedOrder.getOrderNumber(), userId, savedOrder.getStatus(),

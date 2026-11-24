@@ -16,6 +16,7 @@ import com.checkout.engine.repository.InventoryRepository;
 import com.checkout.engine.repository.ProductRepository;
 import com.checkout.engine.repository.SavedItemRepository;
 import com.checkout.engine.repository.UserRepository;
+import com.checkout.engine.service.cache.CacheService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -27,6 +28,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.lang.reflect.Method;
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 
@@ -34,6 +36,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -58,6 +61,9 @@ class SavedItemServiceTest {
 
     @Mock
     private InventoryRepository inventoryRepository;
+
+    @Mock
+    private CacheService cacheService;
 
     @InjectMocks
     private SavedItemService savedItemService;
@@ -112,6 +118,8 @@ class SavedItemServiceTest {
                 .product(sampleProduct)
                 .priceAtSave(BigDecimal.valueOf(120.00))
                 .build();
+
+        lenient().when(inventoryRepository.findByProductIdIn(any())).thenReturn(List.of(sampleInventory));
     }
 
     @Test
@@ -246,7 +254,6 @@ class SavedItemServiceTest {
         // Price was 120.00 at save, current price is 100.00 -> PRICE_DROPPED by 20.00
         when(userRepository.findById(1L)).thenReturn(Optional.of(sampleUser));
         when(savedItemRepository.findByUserId(1L)).thenReturn(List.of(sampleSavedItem));
-        when(inventoryRepository.findByProductId(10L)).thenReturn(Optional.of(sampleInventory));
 
         List<SavedItemResponse> items = savedItemService.getSavedItems(1L);
 
@@ -257,6 +264,27 @@ class SavedItemServiceTest {
         assertThat(item.getPriceDifference()).isEqualByComparingTo("-20.00");
         assertThat(item.getPriceDiffIndicator()).isEqualTo("PRICE_DROPPED");
         assertThat(item.isInStock()).isTrue();
+    }
+
+    @Test
+    void getSavedItems_cacheHit_returnsCachedListWithoutDbQuery() {
+        SavedItemResponse cachedItem = SavedItemResponse.builder()
+                .id(601L)
+                .productId(10L)
+                .sku("SKU-10")
+                .name("Test Product")
+                .currentPrice(BigDecimal.valueOf(100.00))
+                .priceAtSave(BigDecimal.valueOf(120.00))
+                .build();
+
+        when(cacheService.getList("saved:1", SavedItemResponse.class)).thenReturn(Optional.of(List.of(cachedItem)));
+
+        List<SavedItemResponse> items = savedItemService.getSavedItems(1L);
+
+        assertThat(items).hasSize(1);
+        assertThat(items.get(0).getSku()).isEqualTo("SKU-10");
+        verify(userRepository, never()).findById(any());
+        verify(savedItemRepository, never()).findByUserId(any());
     }
 
     @Test

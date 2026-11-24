@@ -56,3 +56,10 @@ checkout:
       key-secret: ${RAZORPAY_KEY_SECRET:rzp_test_sampleKeySecret}
       webhook-secret: ${RAZORPAY_WEBHOOK_SECRET:rzp_test_sampleWebhookSecret}
 
+app:
+  cache:
+    enabled: ${CACHE_ENABLED:true}
+    product-ttl-seconds: ${PRODUCT_CACHE_TTL:600}
+    cart-ttl-seconds: ${CART_CACHE_TTL:300}
+    saved-ttl-seconds: ${SAVED_CACHE_TTL:600}
+

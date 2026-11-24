@@ -16,6 +16,7 @@ import com.checkout.engine.repository.CartRepository;
 import com.checkout.engine.repository.InventoryRepository;
 import com.checkout.engine.repository.ProductRepository;
 import com.checkout.engine.repository.UserRepository;
+import com.checkout.engine.service.cache.CacheService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -32,6 +33,7 @@ import java.util.Optional;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -53,6 +55,9 @@ class CartServiceTest {
 
     @Mock
     private InventoryRepository inventoryRepository;
+
+    @Mock
+    private CacheService cacheService;
 
     @InjectMocks
     private CartService cartService;
@@ -91,6 +96,8 @@ class CartServiceTest {
                 .user(sampleUser)
                 .status(CartStatus.ACTIVE)
                 .build();
+
+        lenient().when(inventoryRepository.findByProductIdIn(any())).thenReturn(List.of(sampleInventory));
     }
 
     @Test
@@ -288,10 +295,32 @@ class CartServiceTest {
         assertThat(response.getTotalItems()).isZero();
 
         verify(cartItemRepository).delete(existingItem);
+        verify(cacheService).evict("cart:1");
+    }
+
+    @Test
+    void getCart_cacheHit_returnsCachedValueWithoutDbQuery() {
+        CartResponse cachedResponse = CartResponse.builder()
+                .cartId(50L)
+                .userId(1L)
+                .status(CartStatus.ACTIVE)
+                .items(Collections.emptyList())
+                .subtotal(BigDecimal.ZERO)
+                .totalItems(0)
+                .build();
+
+        when(cacheService.get("cart:1", CartResponse.class)).thenReturn(Optional.of(cachedResponse));
+
+        CartResponse response = cartService.getCart(1L);
+
+        assertThat(response).isSameAs(cachedResponse);
+        verify(userRepository, never()).findById(any());
+        verify(cartRepository, never()).findByUserIdAndStatus(any(), any());
     }
 
     @Test
     void getCart_userNotFound_throwsException() {
+        when(cacheService.get("cart:999", CartResponse.class)).thenReturn(Optional.empty());
         when(userRepository.findById(999L)).thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> cartService.getCart(999L))

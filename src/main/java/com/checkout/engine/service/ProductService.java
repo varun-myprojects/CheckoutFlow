@@ -9,11 +9,15 @@ import com.checkout.engine.exception.DuplicateRequestException;
 import com.checkout.engine.exception.ResourceNotFoundException;
 import com.checkout.engine.repository.InventoryRepository;
 import com.checkout.engine.repository.ProductRepository;
+import com.checkout.engine.service.cache.CacheService;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+
+import java.time.Duration;
 
 @Service
 @RequiredArgsConstructor
@@ -21,6 +25,10 @@ public class ProductService {
 
     private final ProductRepository productRepository;
     private final InventoryRepository inventoryRepository;
+    private final CacheService cacheService;
+
+    @Value("${app.cache.product-ttl-seconds:600}")
+    private long productTtlSeconds;
 
     @Transactional
     public ProductDetailResponse createProduct(CreateProductRequest request) {
@@ -46,6 +54,7 @@ public class ProductService {
                 .build();
         Inventory savedInventory = inventoryRepository.save(inventory);
 
+        cacheService.evict("product:" + savedProduct.getId());
         return mapToProductDetailResponse(savedProduct, savedInventory);
     }
 
@@ -57,13 +66,19 @@ public class ProductService {
 
     @Transactional(readOnly = true)
     public ProductDetailResponse getProductById(Long id) {
-        Product product = productRepository.findById(id)
-                .orElseThrow(() -> new ResourceNotFoundException("Product", "id", id));
+        String cacheKey = "product:" + id;
+        return cacheService.get(cacheKey, ProductDetailResponse.class)
+                .orElseGet(() -> {
+                    Product product = productRepository.findById(id)
+                            .orElseThrow(() -> new ResourceNotFoundException("Product", "id", id));
 
-        Inventory inventory = inventoryRepository.findByProductId(product.getId())
-                .orElse(null);
+                    Inventory inventory = inventoryRepository.findByProductId(product.getId())
+                            .orElse(null);
 
-        return mapToProductDetailResponse(product, inventory);
+                    ProductDetailResponse response = mapToProductDetailResponse(product, inventory);
+                    cacheService.put(cacheKey, response, Duration.ofSeconds(productTtlSeconds));
+                    return response;
+                });
     }
 
     private ProductResponse mapToProductResponse(Product product) {

@@ -10,6 +10,7 @@ import com.checkout.engine.repository.InventoryRepository;
 import com.checkout.engine.repository.InventoryReservationRepository;
 import com.checkout.engine.repository.OrderRepository;
 import com.checkout.engine.service.OrderStateMachine;
+import com.checkout.engine.service.cache.CacheService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -30,6 +31,7 @@ public class ReservationExpiryJob {
     private final OrderRepository orderRepository;
     private final InventoryRepository inventoryRepository;
     private final OrderStateMachine orderStateMachine;
+    private final CacheService cacheService;
 
     @Scheduled(fixedDelayString = "${checkout.reservation.expiry.fixed-delay-ms:30000}")
     @Transactional
@@ -100,6 +102,8 @@ public class ReservationExpiryJob {
                 inventory.setAvailableQty(newAvailable);
                 inventory.setReservedQty(newReserved);
                 inventoryRepository.save(inventory);
+
+                cacheService.evict("product:" + productId);
 
                 log.info("Released expired reservation {} for order {}: product={}, restored availableQty to {}, reservedQty to {}",
                         res.getId(), order.getOrderNumber(), productId, newAvailable, newReserved);
