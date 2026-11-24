@@ -52,7 +52,7 @@ public class PaymentTransaction extends BaseAuditableEntity {
     @Builder.Default
     @Enumerated(EnumType.STRING)
     @Column(name = "status", nullable = false, length = 50)
-    private PaymentStatus status = PaymentStatus.PENDING;
+    private PaymentStatus status = PaymentStatus.INITIATED;
 
     @Column(name = "payment_method", length = 50)
     private String paymentMethod;

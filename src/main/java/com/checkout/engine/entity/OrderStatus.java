@@ -1,8 +1,10 @@
 package com.checkout.engine.entity;
 
 public enum OrderStatus {
-    PENDING,
+    CREATED,
+    PENDING_PAYMENT,
     CONFIRMED,
-    CANCELLED,
-    COMPLETED
+    FAILED,
+    EXPIRED,
+    CANCELLED
 }

@@ -1,8 +1,8 @@
 package com.checkout.engine.entity;
 
 public enum ReservationStatus {
-    PENDING,
-    CONFIRMED,
+    ACTIVE,
+    CONSUMED,
     RELEASED,
     EXPIRED
 }

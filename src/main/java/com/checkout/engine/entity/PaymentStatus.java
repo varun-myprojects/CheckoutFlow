@@ -1,8 +1,9 @@
 package com.checkout.engine.entity;
 
 public enum PaymentStatus {
-    PENDING,
-    SUCCESS,
+    INITIATED,
+    CAPTURED,
     FAILED,
-    REFUNDED
+    REFUNDED,
+    LATE_PAYMENT_REFUND_PENDING
 }
