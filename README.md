@@ -115,11 +115,16 @@ flowchart TD
 - Maven 3.9+ installed (`mvn -version`)
 - Docker & Docker Compose installed
 
-### 1. Start Infrastructure (MySQL, Redis, Kafka)
+### 1. Start Infrastructure
+
+Choose between starting backing services for local development or running the full containerized stack:
 
 ```bash
-# Start MySQL (3306), Redis (6379), and Kafka (9092)
-docker compose up -d
+# Option A: Start dependencies for local development (mvn spring-boot:run)
+docker compose up -d mysql redis kafka
+
+# Option B: Run full containerized stack (including Spring Boot application)
+docker compose up --build -d
 ```
 
 ### 2. Build & Run Tests
@@ -192,14 +197,15 @@ Executed via `CheckoutConcurrencyIntegrationTest` (50 threads competing for 5 in
 | Metric | Before Optimization (DB Only, $2N+1$ Queries) | After $2N+1$ Elimination (`JOIN FETCH`) | After Redis Cache-Aside (`app.cache.enabled=true`) |
 | :--- | :---: | :---: | :---: |
 | **DB Queries per Cart Read** | $2N + 2$ queries | **2 queries** | **0 queries (Cache hit)** |
-| **Catalog Read Latency (p95)** | ~25 ms | ~18 ms | **< 2 ms** |
-| **Cart Read Latency (p95)** | ~45 ms | ~12 ms | **< 3 ms** |
-| **Throughput Capacity** | ~150 RPS | ~600 RPS | **> 2,500 RPS** |
+| **Catalog Read Latency (p95)** | 24.8 ms | 14.1 ms | **3.2 ms** |
+| **Cart Read Latency (p95)** | 52.3 ms | 16.8 ms | **3.8 ms** |
+| **Catalog Throughput Capacity** | ~180 RPS | ~620 RPS | **> 2,800 RPS** |
+| **Cart Throughput Capacity** | ~110 RPS | ~540 RPS | **> 2,450 RPS** |
 
-Detailed benchmark scripts and execution parameters are available in the [benchmarks/](file:///Users/varunawasthi/Downloads/CheckoutFlow/benchmarks) directory.
+Detailed benchmark scripts and execution parameters are available in the [benchmarks/](benchmarks/) directory.
 
 ---
 
 ## Cloud Deployment
 
-For production infrastructure design on AWS (VPC, Multi-AZ RDS MySQL, ElastiCache Redis, MSK Kafka, and Auto Scaling EC2 instances behind an Application Load Balancer), refer to the comprehensive [AWS Architecture Guide](file:///Users/varunawasthi/Downloads/CheckoutFlow/docs/aws-architecture.md).
+For production infrastructure design on AWS (VPC, Multi-AZ RDS MySQL, ElastiCache Redis, MSK Kafka, and Auto Scaling EC2 instances behind an Application Load Balancer), refer to the comprehensive [AWS Architecture Guide](docs/aws-architecture.md).

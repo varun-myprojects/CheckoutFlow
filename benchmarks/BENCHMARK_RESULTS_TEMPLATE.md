@@ -60,7 +60,7 @@ k6 run -e BASE_URL=http://localhost:8080/api/v1 benchmarks/read_benchmark.js
 | **Latency p50** | 18.2 ms | 7.1 ms | 1.9 ms | **-89.6%** |
 | **Latency p95** | 38.6 ms | 15.2 ms | 3.5 ms | **-90.9%** |
 | **Latency p99** | 66.4 ms | 24.0 ms | 6.1 ms | **-90.8%** |
-| **Optimizer Scan Type** | `ALL` (Table scan) | `ref` (`idx_saved_user_created`) | Cache hit (0 scan) | Sub-millisecond response |
+| **Optimizer Scan Type** | `ALL` (Table scan) | `ref` (`idx_saved_items_user_created`) | Cache hit (0 scan) | Sub-millisecond response |
 
 ---
 
