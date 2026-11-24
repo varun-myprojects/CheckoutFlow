@@ -6,6 +6,10 @@ import com.checkout.engine.dto.ProductDetailResponse;
 import com.checkout.engine.dto.ProductResponse;
 import com.checkout.engine.dto.UpdateProductPriceRequest;
 import com.checkout.engine.service.ProductService;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.responses.ApiResponses;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.Page;
@@ -22,6 +26,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+@Tag(name = "Products", description = "Product catalog browsing, stock level inspection, and pricing mutations with Redis cache-aside")
 @RestController
 @RequestMapping("/api/v1/products")
 @RequiredArgsConstructor
@@ -29,6 +34,11 @@ public class ProductController {
 
     private final ProductService productService;
 
+    @Operation(summary = "Create a new product", description = "Creates a product with initial available inventory")
+    @ApiResponses({
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "201", description = "Product created successfully"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "409", description = "Product SKU already exists")
+    })
     @PostMapping
     public ResponseEntity<ApiResponse<ProductDetailResponse>> createProduct(
             @Valid @RequestBody CreateProductRequest request
@@ -39,6 +49,10 @@ public class ProductController {
                 .body(ApiResponse.success(response, "Product created successfully"));
     }
 
+    @Operation(summary = "List all products", description = "Paged listing of catalog products")
+    @ApiResponses({
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200", description = "Products page retrieved successfully")
+    })
     @GetMapping
     public ResponseEntity<ApiResponse<Page<ProductResponse>>> getProducts(
             @PageableDefault(page = 0, size = 10, sort = "id", direction = Sort.Direction.ASC) Pageable pageable
@@ -47,15 +61,26 @@ public class ProductController {
         return ResponseEntity.ok(ApiResponse.success(products));
     }
 
+    @Operation(summary = "Get product details by ID", description = "Retrieves product with live available and reserved stock counts (Cache-aside via product:{id})")
+    @ApiResponses({
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200", description = "Product retrieved successfully"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "404", description = "Product not found")
+    })
     @GetMapping("/{id}")
-    public ResponseEntity<ApiResponse<ProductDetailResponse>> getProductById(@PathVariable Long id) {
+    public ResponseEntity<ApiResponse<ProductDetailResponse>> getProductById(
+            @Parameter(description = "ID of the product", example = "6") @PathVariable Long id) {
         ProductDetailResponse product = productService.getProductById(id);
         return ResponseEntity.ok(ApiResponse.success(product));
     }
 
+    @Operation(summary = "Update product price", description = "Updates unit price, evicts product:{id} cache, and writes ProductPriceUpdated outbox event triggering price drop alerts")
+    @ApiResponses({
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200", description = "Product price updated successfully"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "404", description = "Product not found")
+    })
     @PatchMapping("/{id}/price")
     public ResponseEntity<ApiResponse<ProductDetailResponse>> updatePrice(
-            @PathVariable Long id,
+            @Parameter(description = "ID of the product", example = "6") @PathVariable Long id,
             @Valid @RequestBody UpdateProductPriceRequest request
     ) {
         ProductDetailResponse response = productService.updateProductPrice(id, request.getPrice());

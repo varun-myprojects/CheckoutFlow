@@ -76,8 +76,8 @@ export default function () {
         }
       },
     });
-  } else if (checkoutRes.status === 400 || checkoutRes.status === 409) {
-    // Clean rejection due to depleted stock or empty cart
+  } else if (checkoutRes.status === 400 || checkoutRes.status === 409 || checkoutRes.status === 422 || checkoutRes.status === 503) {
+    // Clean rejection due to depleted stock (422), lock timeout (503), conflict (409), or empty cart (400)
     stockExhaustedCheckouts.add(1);
   } else {
     // Unexpected 5xx or connection error
